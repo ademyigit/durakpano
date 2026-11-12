@@ -236,8 +236,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 10. Sağlık Kontrolü
-  if (pathname === '/health') {
+  // 10. Sağlık Kontrolü (Render / Kubernetes uyumlu)
+  if (pathname === '/health' || pathname === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('OK');
     return;

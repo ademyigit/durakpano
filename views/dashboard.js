@@ -17,6 +17,7 @@ function renderDashboard(data) {
       otobusler,
       ilkDuraktaBekleyenAraclar,
       ilkDuraktaBekleyenSayisi,
+      duyurular,
       siradakiKalkislar
     } = item;
 
@@ -128,6 +129,23 @@ function renderDashboard(data) {
       `;
     }
 
+    // Resmi İETT Hat Duyuruları (İptal seferler, güzergah değişiklikleri)
+    let duyuruHtml = "";
+    if (duyurular && duyurular.length > 0) {
+      duyuruHtml = `
+        <div class="announcement-bar">
+          <div class="ann-badge">⚠️ RESMİ İETT DUYURUSU (${durak.hatKodu})</div>
+          ${duyurular.map(d => `
+            <div class="ann-item">
+              <span class="ann-type">[${d.tip}]</span>
+              <span class="ann-msg">${d.mesaj}</span>
+              ${d.saat ? `<span class="ann-time">🕒 ${d.saat}</span>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
     return `
       <div class="card">
         <div class="card-header">
@@ -147,6 +165,8 @@ function renderDashboard(data) {
             <span class="line-desc">${durak.hatAdi}</span>
           </div>
         </div>
+
+        ${duyuruHtml}
 
         <div class="card-body">
           ${busListHtml}
@@ -398,6 +418,39 @@ function renderDashboard(data) {
       padding: 8px 11px;
       border-radius: 9px;
       margin-bottom: 10px;
+    }
+    .announcement-bar {
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.45);
+      border-radius: 8px;
+      padding: 7px 10px;
+      margin-bottom: 10px;
+    }
+    .ann-badge {
+      font-size: 10px;
+      font-weight: 800;
+      color: #f87171;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .ann-item {
+      font-size: 11px;
+      color: #fecaca;
+      line-height: 1.35;
+    }
+    .ann-type {
+      font-weight: 800;
+      color: #fbbf24;
+      margin-right: 4px;
+    }
+    .ann-time {
+      display: block;
+      font-size: 10px;
+      color: #94a3b8;
+      margin-top: 2px;
     }
     .line-badge {
       background: #f59e0b;

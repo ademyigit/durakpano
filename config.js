@@ -48,6 +48,7 @@ module.exports = {
     seferGerceklesmeUrl: "https://api.ibb.gov.tr/iett/FiloDurum/SeferGerceklesme.asmx",
     ibbUrl: "https://api.ibb.gov.tr/iett/ibb/ibb.asmx",
     planlananSeferUrl: "https://api.ibb.gov.tr/iett/UlasimAnaVeri/PlanlananSeferSaati.asmx",
+    duyurularUrl: "https://api.ibb.gov.tr/iett/UlasimDinamikVeri/Duyurular.asmx",
     timeoutMs: 8000
   }
 };

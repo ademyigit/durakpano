@@ -12,11 +12,13 @@ const STATIC_CACHE_TTL_MS = 12 * 60 * 60 * 1000; // Durak sırası ve tarife: 12
 const LIVE_GPS_TTL_ACTIVE_MS = 75 * 1000;        // Aktif sefer saatlerinde GPS yenileme: 75 saniye
 const LIVE_GPS_TTL_IDLE_MS = 300 * 1000;         // Sefer saati dışında GPS yenileme: 5 dakika
 const STALE_GPS_MAX_AGE_MS = 8 * 60 * 1000;      // Geçici ağ hatasında son konumu koruma süresi: 8 dakika
+const ANNOUNCEMENTS_TTL_MS = 6 * 60 * 1000;      // İETT Hat Duyuruları: 6 dakika
 
 let cacheStore = {
   routeStops: {}, // { [hatKodu]: { timestamp, stops } }
   schedules: {},  // { [hatKodu]: { timestamp, schedule } }
-  liveBuses: {}   // { [hatKodu]: { timestamp, vehicles, rateLimitedUntil } }
+  liveBuses: {},  // { [hatKodu]: { timestamp, vehicles, rateLimitedUntil } }
+  announcements: { timestamp: 0, list: [] }
 };
 
 const inflightLiveRequests = new Map();
@@ -254,6 +256,56 @@ async function getPlannedSchedule(hatKodu) {
 }
 
 /**
+ * İETT Resmi Hat Duyurularını çeker (İptal seferler, güzergâh değişiklikleri vb.)
+ */
+async function fetchAnnouncements() {
+  const now = Date.now();
+  if (cacheStore.announcements && (now - cacheStore.announcements.timestamp < ANNOUNCEMENTS_TTL_MS)) {
+    return cacheStore.announcements.list || [];
+  }
+
+  try {
+    const res = await soapCall(
+      config.api.duyurularUrl,
+      'http://tempuri.org/GetDuyurular_json',
+      '<GetDuyurular_json xmlns="http://tempuri.org/" />',
+      7000
+    );
+
+    const match = res.data.match(/<GetDuyurular_jsonResult>(.*?)<\/GetDuyurular_jsonResult>/s);
+    if (res.status === 200 && match && match[1]) {
+      const parsed = JSON.parse(match[1]);
+      if (Array.isArray(parsed)) {
+        cacheStore.announcements = { timestamp: Date.now(), list: parsed };
+        saveCacheToDisk();
+        return parsed;
+      }
+    }
+  } catch (e) {
+    // Duyuru servisi hatasında sessizce geç
+  }
+  return cacheStore.announcements ? (cacheStore.announcements.list || []) : [];
+}
+
+async function getHatDuyurulari(hatKodu) {
+  const all = await fetchAnnouncements();
+  const targetHatUpper = String(hatKodu || '').trim().toUpperCase();
+
+  return all
+    .filter(d => {
+      const h = String(d.HATKODU || d.HatKodu || '').trim().toUpperCase();
+      return h === targetHatUpper;
+    })
+    .map(d => ({
+      hatKodu: d.HATKODU || d.HatKodu,
+      hatAdi: d.HAT || d.Hat || '',
+      tip: d.TIP || d.Tip || 'Duyuru',
+      mesaj: (d.MESAJ || d.Mesaj || '').trim(),
+      saat: (d.GUNCELLEME_SAATI || d.GuncellemeSaati || '').replace('Kayit Saati:', '').trim()
+    }));
+}
+
+/**
  * Hattın şu an aktif bir sefer penceresinde olup olmadığını kontrol eder (Rate-Limit tasarrufu)
  */
 function isLineInActiveWindow(schedule, targetYon, istanbulNow) {
@@ -353,9 +405,10 @@ async function fetchLiveBusesSOAP(hatKodu, isActiveWindow = true) {
  * Durağa yaklaşan otobüsleri, gerçek güzergâh mesafesini ve varış dakikalarını hesaplar
  */
 async function getDurakVarisBilgisi(stop) {
-  const [allStops, schedule] = await Promise.all([
+  const [allStops, schedule, duyurular] = await Promise.all([
     getHatStopSequence(stop.hatKodu),
-    getPlannedSchedule(stop.hatKodu)
+    getPlannedSchedule(stop.hatKodu),
+    getHatDuyurulari(stop.hatKodu)
   ]);
 
   const targetStopMeta = allStops.find(s => s.durakKodu === String(stop.durakKodu));
@@ -504,6 +557,7 @@ async function getDurakVarisBilgisi(stop) {
     otobusler: approachingBuses.slice(0, 3),
     ilkDuraktaBekleyenAraclar: waitingAtFirstStopBuses,
     ilkDuraktaBekleyenSayisi: waitingAtFirstStopBuses.length,
+    duyurular: duyurular || [],
     siradakiKalkislar: upcomingDepartures
   };
 }
@@ -531,5 +585,7 @@ function startBackgroundPoller() {
 module.exports = {
   getDurakVarisBilgisi,
   fetchLiveBusesSOAP,
+  fetchAnnouncements,
+  getHatDuyurulari,
   startBackgroundPoller
 };

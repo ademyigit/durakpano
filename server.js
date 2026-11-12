@@ -239,19 +239,46 @@ const server = http.createServer(async (req, res) => {
   // 10. İBB Canlı Bağlantı Teşhis Endpoint'i (Render / Bulut hata analizi için)
   if (pathname === '/api/debug-ibb') {
     try {
-      const res19 = await fetchLiveBusesSOAP('19');
+      const https = require('https');
+      const envelope = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <GetHatOtoKonum_json xmlns="http://tempuri.org/">
+      <HatKodu>19</HatKodu>
+    </GetHatOtoKonum_json>
+  </soap:Body>
+</soap:Envelope>`;
+
+      const reqPromise = new Promise((resolve) => {
+        const r = https.request({
+          hostname: 'api.ibb.gov.tr',
+          port: 443,
+          path: '/iett/FiloDurum/SeferGerceklesme.asmx',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'text/xml; charset=utf-8',
+            'SOAPAction': 'http://tempuri.org/GetHatOtoKonum_json',
+            'User-Agent': 'Mozilla/5.0'
+          },
+          timeout: 6000,
+          rejectUnauthorized: false
+        }, (res) => {
+          let b = '';
+          res.on('data', d => b += d);
+          res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: b }));
+        });
+        r.on('error', e => resolve({ error: e.message, code: e.code }));
+        r.on('timeout', () => { r.destroy(); resolve({ error: 'TIMEOUT' }); });
+        r.write(envelope);
+        r.end();
+      });
+
+      const rawResult = await reqPromise;
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
-        success: true,
-        hat19: {
-          ok: res19.ok,
-          count: res19.vehicles ? res19.vehicles.length : 0,
-          sample: res19.vehicles ? res19.vehicles.slice(0, 2) : []
-        }
-      }));
+      res.end(JSON.stringify({ rawResult }));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: false, error: err.message, stack: err.stack }));
+      res.end(JSON.stringify({ error: err.message }));
     }
     return;
   }

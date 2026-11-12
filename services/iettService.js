@@ -9,8 +9,8 @@ const SEED_FILE = path.join(__dirname, '..', 'data', 'staticRoutes.json');
 
 // Önbellek Süreleri (Broadcom Layer7 Rate-Limit Korumalı)
 const STATIC_CACHE_TTL_MS = 12 * 60 * 60 * 1000; // Durak sırası ve tarife: 12 saat
-const LIVE_GPS_TTL_ACTIVE_MS = 75 * 1000;        // Aktif sefer saatlerinde GPS yenileme: 75 saniye
-const LIVE_GPS_TTL_IDLE_MS = 300 * 1000;         // Sefer saati dışında GPS yenileme: 5 dakika
+const LIVE_GPS_TTL_ACTIVE_MS = 25 * 1000;        // Aktif sefer saatlerinde GPS yenileme: 25 saniye (30 sn dashboard yenilemesiyle senkron)
+const LIVE_GPS_TTL_IDLE_MS = 180 * 1000;         // Sefer saati dışında GPS yenileme: 3 dakika
 const STALE_GPS_MAX_AGE_MS = 8 * 60 * 1000;      // Geçici ağ hatasında son konumu koruma süresi: 8 dakika
 const ANNOUNCEMENTS_TTL_MS = 6 * 60 * 1000;      // İETT Hat Duyuruları: 6 dakika
 
@@ -22,6 +22,8 @@ let cacheStore = {
 };
 
 const inflightLiveRequests = new Map();
+const busEtaHistory = new Map(); // Ani dakika zıplamalarını önleyici yumuşatıcı bellek
+let inflightAnnouncements = null;
 let lastSoapCallTime = 0;
 
 function loadCacheFromDisk() {
@@ -260,31 +262,47 @@ async function getPlannedSchedule(hatKodu) {
  */
 async function fetchAnnouncements() {
   const now = Date.now();
-  if (cacheStore.announcements && (now - cacheStore.announcements.timestamp < ANNOUNCEMENTS_TTL_MS)) {
+  if (cacheStore.announcements && (now - cacheStore.announcements.timestamp < ANNOUNCEMENTS_TTL_MS) && cacheStore.announcements.list && cacheStore.announcements.list.length > 0) {
     return cacheStore.announcements.list || [];
   }
 
-  try {
-    const res = await soapCall(
-      config.api.duyurularUrl,
-      'http://tempuri.org/GetDuyurular_json',
-      '<GetDuyurular_json xmlns="http://tempuri.org/" />',
-      7000
-    );
-
-    const match = res.data.match(/<GetDuyurular_jsonResult>(.*?)<\/GetDuyurular_jsonResult>/s);
-    if (res.status === 200 && match && match[1]) {
-      const parsed = JSON.parse(match[1]);
-      if (Array.isArray(parsed)) {
-        cacheStore.announcements = { timestamp: Date.now(), list: parsed };
-        saveCacheToDisk();
-        return parsed;
-      }
-    }
-  } catch (e) {
-    // Duyuru servisi hatasında sessizce geç
+  if (inflightAnnouncements) {
+    return inflightAnnouncements;
   }
-  return cacheStore.announcements ? (cacheStore.announcements.list || []) : [];
+
+  inflightAnnouncements = (async () => {
+    try {
+      const sinceLast = Date.now() - lastSoapCallTime;
+      if (sinceLast < 2500) {
+        await new Promise(r => setTimeout(r, 2500 - sinceLast));
+      }
+      lastSoapCallTime = Date.now();
+
+      const res = await soapCall(
+        config.api.duyurularUrl,
+        'http://tempuri.org/GetDuyurular_json',
+        '<GetDuyurular_json xmlns="http://tempuri.org/" />',
+        7000
+      );
+
+      const match = res.data.match(/<GetDuyurular_jsonResult>(.*?)<\/GetDuyurular_jsonResult>/s);
+      if (res.status === 200 && match && match[1]) {
+        const parsed = JSON.parse(match[1]);
+        if (Array.isArray(parsed)) {
+          cacheStore.announcements = { timestamp: Date.now(), list: parsed };
+          saveCacheToDisk();
+          return parsed;
+        }
+      }
+    } catch (e) {
+      // Duyuru servisi hatasında sessizce geç
+    } finally {
+      inflightAnnouncements = null;
+    }
+    return cacheStore.announcements ? (cacheStore.announcements.list || []) : [];
+  })();
+
+  return inflightAnnouncements;
 }
 
 async function getHatDuyurulari(hatKodu) {
@@ -464,9 +482,18 @@ async function getDurakVarisBilgisi(stop) {
 
       let curIdx = routeStops.findIndex(s => s.durakKodu === yakinKod);
 
-      // Eğer yakinDurakKodu alt varyant nedeniyle bulunamadıysa GPS koordinatına en yakın (<=250m) durağı bul
+      // 1. Karşı yön (D/G) ikiz durak kodu eşleşmesi (Örn: İETT karşı yöndeki 205682 kodunu yolladıysa G yönündeki 205681'i bul)
+      if (curIdx === -1 && yakinKod) {
+        const meta = allStops.find(s => s.durakKodu === yakinKod);
+        if (meta && meta.durakAdi) {
+          const byName = routeStops.findIndex(s => s.durakAdi === meta.durakAdi);
+          if (byName !== -1) curIdx = byName;
+        }
+      }
+
+      // 2. Alt varyant veya iki durak arasında seyir halindeki araçlar için güzergâhtaki en yakın durağı bul (1.2 km yarıçap)
       if (curIdx === -1 && !isNaN(lat) && !isNaN(lng)) {
-        let bestDist = 0.25;
+        let bestDist = 1.2;
         for (let i = 0; i <= targetIdx; i++) {
           const d = calculateDistanceKm(lat, lng, routeStops[i].lat, routeStops[i].lng);
           if (d < bestDist) {
@@ -481,7 +508,6 @@ async function getDurakVarisBilgisi(stop) {
       const currentStop = routeStops[curIdx];
       const doorNo = String(v.kapino || v.KapiNo || 'İETT').trim();
       const sonKonum = v.son_konum_zamani || '';
-      const elapsedMin = parseGpsTimestampMinutesAgo(sonKonum, istanbulNow);
 
       // İlk durakta (Sıra 1) bekleyen araç kontrolü
       const sonDurakAdi = formatSonDurak(v.yon, stop.hedefYon);
@@ -518,13 +544,23 @@ async function getDurakVarisBilgisi(stop) {
         routeKm = Math.max(0.05, distToNext + remainingSegmentsKm);
       }
 
-      // İstanbul şehir içi otobüs hızı (~20-21 km/s = 2.85 dk/km) + durak başı bekleme (0.35 dk) - son GPS pinginden beri geçen süre
+      // İstanbul şehir içi otobüs seyir süresi hesabı: ~2.8 dk/km + durak başı ~0.35 dk
       let kalanDakika = 0;
-      if (kalanDurak === 0 && routeKm <= 0.15) {
-        kalanDakika = 0;
+      if (kalanDurak === 0 && routeKm <= 0.20) {
+        kalanDakika = 0; // Durakta
       } else {
-        const rawTravelMinutes = (routeKm * 2.85) + (kalanDurak * 0.35);
-        kalanDakika = Math.max(1, Math.round(rawTravelMinutes - (elapsedMin * 0.85)));
+        const rawTravelMinutes = (routeKm * 2.8) + (kalanDurak * 0.35);
+        let calculated = Math.max(1, Math.round(rawTravelMinutes));
+
+        // Ani dakika zıplamasını engelleyen zaman yumuşatma filtresi (smoothing)
+        const histKey = `${stop.hatKodu}_${doorNo}`;
+        const prev = busEtaHistory.get(histKey);
+        const nowMs = Date.now();
+        if (prev && (nowMs - prev.timestamp < 120 * 1000) && Math.abs(calculated - prev.kalanDakika) >= 3 && Math.abs(kalanDurak - prev.kalanDurak) <= 1) {
+          calculated = Math.round((prev.kalanDakika * 0.4) + (calculated * 0.6));
+        }
+        busEtaHistory.set(histKey, { kalanDakika: calculated, kalanDurak, timestamp: nowMs });
+        kalanDakika = calculated;
       }
 
       const saatParca = sonKonum.split(' ')[1] ? sonKonum.split(' ')[1].slice(0, 5) : null;

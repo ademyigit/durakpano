@@ -1,5 +1,15 @@
 function renderDashboard(data) {
-  const { title, refreshSeconds, currentTime, currentDate, stopsData } = data;
+  const {
+    title,
+    refreshSeconds,
+    currentTime,
+    currentDate,
+    stopsData,
+    weather,
+    cameraStatus
+  } = data;
+
+  const isCamActive = Boolean(cameraStatus && cameraStatus.active);
 
   const cardsHtml = stopsData.map(item => {
     const {
@@ -147,6 +157,21 @@ function renderDashboard(data) {
     `;
   }).join('');
 
+  // Hava Durumu HTML Bloğu
+  const weatherHtml = weather ? `
+    <div class="weather-widget">
+      <div class="weather-main">
+        <span class="weather-icon">${weather.icon || '☀️'}</span>
+        <span class="weather-temp">${weather.temp}°C</span>
+        <span class="weather-condition">${weather.condition}</span>
+        <span class="weather-feels">(Hissedilen: ${weather.feelsLike}°C)</span>
+      </div>
+      <div class="weather-summary">
+        📍 <strong>${weather.location}</strong> • ${weather.summary}
+      </div>
+    </div>
+  ` : '';
+
   return `<!DOCTYPE html>
 <html lang="tr">
 <head>
@@ -175,20 +200,22 @@ function renderDashboard(data) {
     header {
       background: #0f172a;
       border-bottom: 2px solid #1e293b;
-      height: 52px;
+      min-height: 56px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0 18px;
+      padding: 6px 18px;
       flex-shrink: 0;
+      gap: 16px;
     }
     .logo-area {
       display: flex;
       align-items: center;
       gap: 10px;
+      flex-shrink: 0;
     }
     .logo-icon {
-      font-size: 20px;
+      font-size: 22px;
     }
     .logo-text {
       font-size: 19px;
@@ -202,11 +229,94 @@ function renderDashboard(data) {
       margin-left: 4px;
       text-transform: uppercase;
     }
+    .weather-widget {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #172033;
+      border: 1px solid #1e293b;
+      border-radius: 9px;
+      padding: 4px 12px;
+      min-width: 0;
+    }
+    .weather-main {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #f8fafc;
+      white-space: nowrap;
+    }
+    .weather-icon {
+      font-size: 16px;
+    }
+    .weather-temp {
+      font-size: 15px;
+      font-weight: 900;
+      color: #fbbf24;
+    }
+    .weather-feels {
+      font-size: 11px;
+      color: #94a3b8;
+      font-weight: 500;
+    }
+    .weather-summary {
+      font-size: 11px;
+      color: #93c5fd;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    .cam-btn {
+      height: 38px;
+      padding: 0 12px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #cbd5e1;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+    .cam-btn.active {
+      background: rgba(239, 68, 68, 0.2);
+      border-color: #ef4444;
+      color: #fca5a5;
+    }
+    .cam-btn-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #64748b;
+    }
+    .cam-btn.active .cam-btn-dot {
+      background: #ef4444;
+      box-shadow: 0 0 8px #ef4444;
+      animation: pulse 1.2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
     .clock-area {
       text-align: right;
       display: flex;
       align-items: baseline;
-      gap: 12px;
+      gap: 10px;
     }
     .clock-time {
       font-size: 26px;
@@ -216,7 +326,7 @@ function renderDashboard(data) {
       letter-spacing: 1px;
     }
     .clock-date {
-      font-size: 12px;
+      font-size: 11px;
       color: #94a3b8;
     }
     main {
@@ -224,7 +334,7 @@ function renderDashboard(data) {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 14px;
-      padding: 12px 14px;
+      padding: 10px 14px;
       background: #080c14;
       align-items: stretch;
       overflow: hidden;
@@ -499,9 +609,45 @@ function renderDashboard(data) {
       color: #64748b;
       flex-shrink: 0;
     }
+    .cam-preview-box {
+      position: fixed;
+      bottom: 30px;
+      right: 18px;
+      width: 170px;
+      height: 125px;
+      background: #000;
+      border: 2px solid #ef4444;
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.7);
+      overflow: hidden;
+      z-index: 1000;
+      display: none;
+    }
+    .cam-preview-box.show {
+      display: block;
+    }
+    .cam-preview-video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+    .cam-preview-badge {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      background: rgba(239, 68, 68, 0.85);
+      color: #fff;
+      font-size: 9px;
+      font-weight: 800;
+      padding: 2px 5px;
+      border-radius: 4px;
+    }
     @media (max-width: 650px) {
       body { overflow-y: auto; height: auto; }
       main { grid-template-columns: 1fr; }
+      header { flex-wrap: wrap; height: auto; padding: 10px 14px; }
+      .weather-widget { order: 3; width: 100%; margin-top: 6px; }
     }
   </style>
 </head>
@@ -509,12 +655,24 @@ function renderDashboard(data) {
   <header>
     <div class="logo-area">
       <span class="logo-icon">🚍</span>
-      <span class="logo-text">DURAKPANO</span>
-      <span class="logo-sub">Canlı İETT Durak Ekranı</span>
+      <div>
+        <span class="logo-text">DURAKPANO</span>
+        <span class="logo-sub">Canlı Ulaşım & Ev Ekranı</span>
+      </div>
     </div>
-    <div class="clock-area">
-      <span class="clock-date">${currentDate}</span>
-      <span class="clock-time">${currentTime}</span>
+
+    ${weatherHtml}
+
+    <div class="header-right">
+      <button id="camToggleBtn" class="cam-btn ${isCamActive ? 'active' : ''}" onclick="toggleCamera()">
+        <span class="cam-btn-dot"></span>
+        <span id="camBtnText">${isCamActive ? 'Kamera: CANLI' : '📷 Ev Kamerası'}</span>
+      </button>
+
+      <div class="clock-area">
+        <span class="clock-date">${currentDate}</span>
+        <span class="clock-time">${currentTime}</span>
+      </div>
     </div>
   </header>
 
@@ -522,10 +680,136 @@ function renderDashboard(data) {
     ${cardsHtml}
   </main>
 
+  <div id="camPreviewBox" class="cam-preview-box ${isCamActive ? 'show' : ''}">
+    <span class="cam-preview-badge">🔴 EVİ İZLEME AKTİF</span>
+    <video id="camLocalVideo" class="cam-preview-video" autoplay playsinline muted></video>
+    <canvas id="camCaptureCanvas" width="480" height="360" style="display: none;"></canvas>
+  </div>
+
   <footer>
-    <span>Otomatik Yenileme: ${refreshSeconds} sn • Doğrudan İBB Canlı Filo GPS & Güzergâh Sistemi</span>
-    <span>Durak: 205671 (19) & 213801 (14TM)</span>
+    <span>Otomatik Yenileme: ${refreshSeconds} sn • İBB Canlı Filo & Open-Meteo Ataşehir Servisi</span>
+    <span>Dışarıdan İzle: <strong>/camera</strong> (PIN: 1923)</span>
   </footer>
+
+  <script>
+    let camStream = null;
+    let captureInterval = null;
+    const camBtn = document.getElementById('camToggleBtn');
+    const camBtnText = document.getElementById('camBtnText');
+    const camPreviewBox = document.getElementById('camPreviewBox');
+    const camLocalVideo = document.getElementById('camLocalVideo');
+    const camCanvas = document.getElementById('camCaptureCanvas');
+    const ctx = camCanvas ? camCanvas.getContext('2d') : null;
+
+    // Sayfa açıldığında localStorage'da aktif kamera tercihi varsa otomatik devam et
+    window.addEventListener('DOMContentLoaded', () => {
+      if (localStorage.getItem('durakpano_cam_enabled') === 'true') {
+        startCameraStream();
+      }
+    });
+
+    function toggleCamera() {
+      if (camStream) {
+        stopCameraStream();
+      } else {
+        startCameraStream();
+      }
+    }
+
+    async function startCameraStream() {
+      try {
+        const constraints = {
+          video: {
+            width: { ideal: 480 },
+            height: { ideal: 360 },
+            facingMode: 'user'
+          },
+          audio: false
+        };
+
+        const getUserMedia = (navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+          ? (c) => navigator.mediaDevices.getUserMedia(c)
+          : (c) => new Promise((resolve, reject) => {
+              const legacy = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+              if (!legacy) return reject(new Error('Kamera desteklenmiyor'));
+              legacy.call(navigator, c, resolve, reject);
+            });
+
+        camStream = await getUserMedia(constraints);
+        camLocalVideo.srcObject = camStream;
+        camLocalVideo.play();
+
+        camBtn.classList.add('active');
+        camBtnText.textContent = 'Kamera: CANLI';
+        camPreviewBox.classList.add('show');
+        localStorage.setItem('durakpano_cam_enabled', 'true');
+
+        // Her 800 ms'de 1 kare yakalayıp sunucuya gönder
+        if (captureInterval) clearInterval(captureInterval);
+        captureInterval = setInterval(sendFrameToServer, 850);
+
+        // İlk kareyi hemen gönder
+        setTimeout(sendFrameToServer, 400);
+      } catch (err) {
+        console.error('Kamera başlatılamadı:', err);
+        alert('Kamera açılamadı: ' + err.message + '\\nLütfen tarayıcınızdan kamera izni verin.');
+        stopCameraStream();
+      }
+    }
+
+    function stopCameraStream() {
+      if (captureInterval) {
+        clearInterval(captureInterval);
+        captureInterval = null;
+      }
+      if (camStream) {
+        camStream.getTracks().forEach(t => t.stop());
+        camStream = null;
+      }
+      if (camLocalVideo) {
+        camLocalVideo.srcObject = null;
+      }
+
+      camBtn.classList.remove('active');
+      camBtnText.textContent = '📷 Ev Kamerası';
+      camPreviewBox.classList.remove('show');
+      localStorage.setItem('durakpano_cam_enabled', 'false');
+
+      // Sunucuya kameranın kapatıldığını bildir
+      try {
+        fetch('/api/camera/stop', { method: 'POST' }).catch(() => {});
+      } catch (e) {}
+    }
+
+    function sendFrameToServer() {
+      if (!camStream || !camLocalVideo || !camCanvas || !ctx) return;
+      if (camLocalVideo.readyState < 2) return;
+
+      try {
+        ctx.drawImage(camLocalVideo, 0, 0, camCanvas.width, camCanvas.height);
+        if (camCanvas.toBlob) {
+          camCanvas.toBlob((blob) => {
+            if (!blob) return;
+            fetch('/api/camera/upload', {
+              method: 'POST',
+              headers: { 'Content-Type': 'image/jpeg' },
+              body: blob
+            }).catch(() => {});
+          }, 'image/jpeg', 0.55);
+        } else {
+          // Eski WebView desteği
+          const dataUrl = camCanvas.toDataURL('image/jpeg', 0.55);
+          fetch('/api/camera/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data: dataUrl })
+          }).catch(() => {});
+        }
+      } catch (e) {
+        // Frame yakalama hatasını yut
+      }
+    }
+  </script>
 </body>
 </html>`;
 }

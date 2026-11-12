@@ -1,8 +1,23 @@
 // DurakPano Yapılandırma Dosyası
 module.exports = {
   // Sayfa başlığı ve yenileme sıklığı (saniye cinsinden)
-  siteTitle: "DurakPano - Canlı Ulaşım Ekranı",
+  siteTitle: "DurakPano - Canlı Ulaşım & Ev Ekranı",
   refreshIntervalSeconds: 30,
+
+  // Hava durumu (Ataşehir, İstanbul)
+  weather: {
+    enabled: true,
+    locationName: "Ataşehir",
+    lat: 40.976097,
+    lng: 29.139142,
+    cacheTtlMinutes: 15
+  },
+
+  // Uzaktan ev kamerası güvenliği
+  camera: {
+    enabled: true,
+    pin: "1923" // Dışarıdan telefonla bağlanırken sorulacak PIN kodu
+  },
 
   // Takip edilecek duraklar ve hatlar
   stops: [

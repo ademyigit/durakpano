@@ -14,12 +14,18 @@ function renderDashboard(data) {
     let statusBadgeClass = "badge-standby";
     let statusText = "● SEFER BEKLENİYOR";
 
+    const formatWaitingBus = (w) => (typeof w === 'object' && w && w.kapiNo)
+      ? `${w.kapiNo} (${w.sonDurak || 'İlk Durak'})`
+      : String(w);
+
+    const waitingBusesStr = (ilkDuraktaBekleyenAraclar || []).map(formatWaitingBus).join(', ');
+
     if (hasLiveBus) {
       statusBadgeClass = "badge-live";
       statusText = "● CANLI GPS AKTİF";
     } else if (ilkDuraktaBekleyenSayisi > 0) {
       statusBadgeClass = "badge-ready";
-      statusText = `● İLK DURAKTA HAZIR (${ilkDuraktaBekleyenAraclar.join(', ')})`;
+      statusText = `● İLK DURAKTA HAZIR (${waitingBusesStr})`;
     }
 
     let busListHtml = "";
@@ -27,7 +33,7 @@ function renderDashboard(data) {
     if (!hasLiveBus) {
       const nextTime = siradakiKalkislar && siradakiKalkislar.length > 0 ? siradakiKalkislar[0] : null;
       const waitingInfo = ilkDuraktaBekleyenSayisi > 0
-        ? `<div class="empty-sub">🚍 <strong>${ilkDuraktaBekleyenAraclar.join(', ')}</strong> kapı numaralı araç şu an <strong>${durak.ilkDurakAdi}</strong> ilk durağında kalkış için bekliyor.${nextTime ? ` (Kalkış: <strong>${nextTime}</strong>)` : ''}</div>`
+        ? `<div class="empty-sub">🚍 <strong>${waitingBusesStr}</strong> araç şu an <strong>${durak.ilkDurakAdi}</strong> ilk durağında kalkış için bekliyor.${nextTime ? ` (Kalkış: <strong>${nextTime}</strong>)` : ''}</div>`
         : (nextTime
           ? `<div class="empty-sub">İlk duraktan (<strong>${durak.ilkDurakAdi}</strong>) sıradaki planlı kalkış saati: <strong>${nextTime}</strong></div>`
           : `<div class="empty-sub">Bugün için bu yönde planlı başka sefer bulunmuyor.</div>`);
@@ -42,6 +48,9 @@ function renderDashboard(data) {
       const firstBus = otobusler[0];
       const otherBuses = otobusler.slice(1);
       const isAtStop = firstBus.kalanDakika === 0;
+      const sonDurakHtml = firstBus.sonDurak
+        ? `<span class="dest-badge">➔ ${firstBus.sonDurak}</span>`
+        : '';
 
       busListHtml = `
         <div class="primary-bus ${isAtStop ? 'bus-imminent' : ''}">
@@ -51,7 +60,7 @@ function renderDashboard(data) {
           </div>
           <div class="arrival-detail">
             <div class="detail-line">
-              🚍 Kapı: <strong>${firstBus.kapiNo}</strong> • <strong>${firstBus.kalanDurak} durak kaldı</strong> (${firstBus.mesafeKm} km)
+              🚍 Kapı: <strong>${firstBus.kapiNo}</strong> ${sonDurakHtml} • <strong>${firstBus.kalanDurak} durak kaldı</strong> (${firstBus.mesafeKm} km)
             </div>
             <div class="detail-location">
               📍 Konum: <strong>${firstBus.bulunduguDurak}</strong>
@@ -67,7 +76,7 @@ function renderDashboard(data) {
             <div class="sec-pills">
               ${otherBuses.map(b => `
                 <span class="sec-pill">
-                  <strong>${b.kalanDakika} dk</strong> (${b.kapiNo} • ${b.bulunduguDurak}, ${b.kalanDurak} durak)
+                  <strong>${b.kalanDakika} dk</strong> (${b.kapiNo}${b.sonDurak ? ` ➔ ${b.sonDurak}` : ''} • ${b.bulunduguDurak}, ${b.kalanDurak} durak)
                 </span>
               `).join('')}
             </div>
@@ -80,7 +89,7 @@ function renderDashboard(data) {
             <span class="sec-label">İlk Durakta Hazır:</span>
             <div class="sec-pills">
               <span class="sec-pill">
-                <strong>${ilkDuraktaBekleyenAraclar.join(', ')}</strong> (${durak.ilkDurakAdi} • ${nextDep})
+                <strong>${waitingBusesStr}</strong> (${durak.ilkDurakAdi} • ${nextDep})
               </span>
             </div>
           </div>
@@ -369,6 +378,22 @@ function renderDashboard(data) {
     .detail-line {
       font-size: 13px;
       color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .dest-badge {
+      display: inline-flex;
+      align-items: center;
+      background: #f59e0b;
+      color: #0b0f19;
+      font-weight: 800;
+      font-size: 11px;
+      padding: 1px 7px;
+      border-radius: 5px;
+      letter-spacing: 0.3px;
+      white-space: nowrap;
     }
     .detail-location {
       font-size: 12px;

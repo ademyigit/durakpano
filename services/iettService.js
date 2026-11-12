@@ -68,6 +68,25 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
 }
 
 /**
+ * Son durak / hedef yön bilgisini sade ve anlaşılır formata dönüştürür (Örn: Bostancı, Uzunçayır)
+ */
+function formatSonDurak(rawYon, defaultYon) {
+  const str = String(rawYon || defaultYon || '').trim();
+  const upper = str.toUpperCase('tr-TR');
+
+  if (upper.includes('BOSTANCI')) return 'Bostancı';
+  if (upper.includes('UZUNÇAYIR')) return 'Uzunçayır';
+  if (upper.includes('KADIKÖY')) return 'Kadıköy';
+  if (upper.includes('CEVİZLİ')) return 'Cevizli Peronlar';
+  if (upper.includes('MALTEPE')) return 'Maltepe Metro';
+  if (upper.includes('TEPEÜSTÜ')) return 'Tepeüstü';
+  if (upper.includes('YEDİTEPE')) return 'Yeditepe Üni.';
+  if (upper.includes('FERHATPAŞA')) return 'Ferhatpaşa';
+
+  return str.replace(/PERONLAR/gi, '').replace(/METROBÜS/gi, '').trim() || str;
+}
+
+/**
  * İstanbul yerel zamanını döndürür
  */
 function getIstanbulNow() {
@@ -392,13 +411,19 @@ async function getDurakVarisBilgisi(stop) {
       const elapsedMin = parseGpsTimestampMinutesAgo(sonKonum, istanbulNow);
 
       // İlk durakta (Sıra 1) bekleyen araç kontrolü
+      const sonDurakAdi = formatSonDurak(v.yon, stop.hedefYon);
+
       if (curIdx === 0) {
         const distFromStart = (!isNaN(lat) && !isNaN(lng))
           ? calculateDistanceKm(lat, lng, routeStops[0].lat, routeStops[0].lng)
           : 0;
         // Eğer ilk duraktan 140 metreden fazla uzaklaşmadıysa henüz kalkış saatini bekliyordur
         if (distFromStart < 0.14) {
-          waitingAtFirstStopBuses.push(doorNo);
+          waitingAtFirstStopBuses.push({
+            kapiNo: doorNo,
+            sonDurak: sonDurakAdi,
+            hedefYon: v.yon || stop.hedefYon
+          });
           continue;
         }
       }
@@ -434,6 +459,7 @@ async function getDurakVarisBilgisi(stop) {
       approachingBuses.push({
         hatKodu: stop.hatKodu,
         kapiNo: doorNo,
+        sonDurak: sonDurakAdi,
         kalanDakika,
         kalanDurak,
         bulunduguDurak: currentStop.durakAdi,

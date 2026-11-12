@@ -1,7 +1,7 @@
 const http = require('http');
 const { URL } = require('url');
 const config = require('./config');
-const { getDurakVarisBilgisi, startBackgroundPoller } = require('./services/iettService');
+const { getDurakVarisBilgisi, fetchLiveBusesSOAP, startBackgroundPoller } = require('./services/iettService');
 const { getAtasehirWeather } = require('./services/weatherService');
 const {
   updateFrame,
@@ -236,7 +236,27 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 10. Sağlık Kontrolü (Render / Kubernetes uyumlu)
+  // 10. İBB Canlı Bağlantı Teşhis Endpoint'i (Render / Bulut hata analizi için)
+  if (pathname === '/api/debug-ibb') {
+    try {
+      const res19 = await fetchLiveBusesSOAP('19');
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        success: true,
+        hat19: {
+          ok: res19.ok,
+          count: res19.vehicles ? res19.vehicles.length : 0,
+          sample: res19.vehicles ? res19.vehicles.slice(0, 2) : []
+        }
+      }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: false, error: err.message, stack: err.stack }));
+    }
+    return;
+  }
+
+  // 11. Sağlık Kontrolü (Render / Kubernetes uyumlu)
   if (pathname === '/health' || pathname === '/healthz') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('OK');

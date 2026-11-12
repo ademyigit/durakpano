@@ -5,6 +5,7 @@ const { URL } = require('url');
 const config = require('../config');
 
 const CACHE_FILE = path.join(__dirname, '..', '.iett_cache.json');
+const SEED_FILE = path.join(__dirname, '..', 'data', 'staticRoutes.json');
 
 // Önbellek Süreleri (Broadcom Layer7 Rate-Limit Korumalı)
 const STATIC_CACHE_TTL_MS = 12 * 60 * 60 * 1000; // Durak sırası ve tarife: 12 saat
@@ -34,6 +35,25 @@ function loadCacheFromDisk() {
     }
   } catch (e) {
     // Disk önbelleği okunamazsa bellek içi devam et
+  }
+
+  // Render / Bulut gibi temiz ortamlarda hazır durak ve sefer saatlerini tohum veriden yükle
+  if (Object.keys(cacheStore.routeStops).length === 0 || Object.keys(cacheStore.schedules).length === 0) {
+    try {
+      if (fs.existsSync(SEED_FILE)) {
+        const seed = JSON.parse(fs.readFileSync(SEED_FILE, 'utf-8'));
+        if (seed) {
+          if (Object.keys(cacheStore.routeStops).length === 0 && seed.routeStops) {
+            cacheStore.routeStops = seed.routeStops;
+          }
+          if (Object.keys(cacheStore.schedules).length === 0 && seed.schedules) {
+            cacheStore.schedules = seed.schedules;
+          }
+        }
+      }
+    } catch (e) {
+      // Tohum verisi okunamazsa sessizce devam et
+    }
   }
 }
 
@@ -510,5 +530,6 @@ function startBackgroundPoller() {
 
 module.exports = {
   getDurakVarisBilgisi,
+  fetchLiveBusesSOAP,
   startBackgroundPoller
 };

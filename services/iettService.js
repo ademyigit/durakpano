@@ -544,12 +544,19 @@ async function getDurakVarisBilgisi(stop) {
         routeKm = Math.max(0.05, distToNext + remainingSegmentsKm);
       }
 
-      // İstanbul şehir içi otobüs seyir süresi hesabı: ~2.8 dk/km + durak başı ~0.35 dk
+      // İstanbul şehir içi saat dilimine göre dinamik hız katsayısı:
+      // Gece (20:30 - 06:30): Trafik açık, duraklarda bekleme az (~35 km/s -> 1.7 dk/km + 0.20 dk/durak)
+      // Gündüz (06:30 - 20:30): Normal şehir içi trafik (~22-25 km/s -> 2.3 dk/km + 0.30 dk/durak)
+      const currentHour = istanbulNow.getHours() + (istanbulNow.getMinutes() / 60);
+      const isNight = currentHour >= 20.5 || currentHour < 6.5;
+      const kmFactor = isNight ? 1.7 : 2.3;
+      const stopFactor = isNight ? 0.20 : 0.30;
+
       let kalanDakika = 0;
       if (kalanDurak === 0 && routeKm <= 0.20) {
         kalanDakika = 0; // Durakta
       } else {
-        const rawTravelMinutes = (routeKm * 2.8) + (kalanDurak * 0.35);
+        const rawTravelMinutes = (routeKm * kmFactor) + (kalanDurak * stopFactor);
         let calculated = Math.max(1, Math.round(rawTravelMinutes));
 
         // Ani dakika zıplamasını engelleyen zaman yumuşatma filtresi (smoothing)
@@ -581,7 +588,18 @@ async function getDurakVarisBilgisi(stop) {
     }
   }
 
-  approachingBuses.sort((a, b) => a.kalanDakika - b.kalanDakika);
+  approachingBuses.sort((a, b) => {
+    // 1. Öncelikle durağa fiziksel olarak kalan durak sayısına göre
+    if (a.kalanDurak !== b.kalanDurak) {
+      return a.kalanDurak - b.kalanDurak;
+    }
+    // 2. Kalan durak eşitse kalan yol mesafesine (km) göre
+    if (parseFloat(a.mesafeKm) !== parseFloat(b.mesafeKm)) {
+      return parseFloat(a.mesafeKm) - parseFloat(b.mesafeKm);
+    }
+    // 3. Eşitse tahmini dakikaya göre
+    return a.kalanDakika - b.kalanDakika;
+  });
 
   return {
     durak: {

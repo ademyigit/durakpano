@@ -1,0 +1,25 @@
+{
+  "name": "durakpano",
+  "version": "1.0.0",
+  "description": "Eski tablet ve ekranlar için ultra hafif, açık kaynaklı akıllı durak ve canlı ulaşım bilgi panosu.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "iett",
+    "durak",
+    "istanbul",
+    "kiosk",
+    "tablet",
+    "transit",
+    "smart-home"
+  ],
+  "author": "Adem Yiğit",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2",
+    "axios": "^1.7.2"
+  }
+}

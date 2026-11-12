@@ -5,7 +5,6 @@ module.exports = {
   refreshIntervalSeconds: 30,
 
   // Takip edilecek duraklar ve hatlar
-  // İstediğiniz kadar durak veya hat ekleyebilirsiniz.
   stops: [
     {
       id: "inonu-19",
@@ -13,9 +12,9 @@ module.exports = {
       durakAdi: "İnönü Mahallesi",
       ilce: "Ataşehir",
       hatKodu: "19",
-      hatAdi: "Ferhatpaşa / Fındıklı - Kadıköy",
-      hedefYon: "Kadıköy Yönü",
-      koordinat: { lat: 40.9758, lng: 29.1399 }
+      hatAdi: "Ferhatpaşa / Yeditepe Üni. - Kadıköy",
+      hedefYon: "Kadıköy / Uzunçayır Yönü",
+      koordinat: { lat: 40.976097, lng: 29.139142 }
     },
     {
       id: "uhud-14tm",
@@ -23,16 +22,17 @@ module.exports = {
       durakAdi: "Uhud Camii",
       ilce: "Ataşehir",
       hatKodu: "14TM",
-      hatAdi: "Tepeüstü - Cevizli Peronlar",
-      hedefYon: "Cevizli / Maltepe Yönü",
-      koordinat: { lat: 40.9805, lng: 29.1462 }
+      hatAdi: "Tepeüstü - Maltepe Metro / Cevizli",
+      hedefYon: "Bostancı / Maltepe Yönü",
+      koordinat: { lat: 40.975381, lng: 29.143251 }
     }
   ],
 
-  // İBB / İETT Servis Ayarları
+  // İBB / İETT Resmi Açık Veri SOAP Servisleri
   api: {
     seferGerceklesmeUrl: "https://api.ibb.gov.tr/iett/FiloDurum/SeferGerceklesme.asmx",
-    hatDurakUrl: "https://api.ibb.gov.tr/iett/UlasimAnaVeri/HatDurakGuzergah.asmx",
-    timeoutMs: 6000
+    ibbUrl: "https://api.ibb.gov.tr/iett/ibb/ibb.asmx",
+    planlananSeferUrl: "https://api.ibb.gov.tr/iett/UlasimAnaVeri/PlanlananSeferSaati.asmx",
+    timeoutMs: 8000
   }
 };

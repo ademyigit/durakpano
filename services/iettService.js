@@ -4,20 +4,28 @@ const path = require('path');
 const { URL } = require('url');
 const config = require('../config');
 
-// Kalıcı önbellek dosyası
 const CACHE_FILE = path.join(__dirname, '..', '.iett_cache.json');
 
-// Önbellek ve Sorgulama Süreleri
+// Önbellek Süreleri
 const STATIC_CACHE_TTL_MS = 12 * 60 * 60 * 1000; // Durak sırası ve tarife: 12 saat
-const LIVE_POLL_INTERVAL_MS = 180 * 1000;        // Canlı GPS sorgusu: 3 dakika (İBB Layer7 Rate Limit koruması)
-const STALE_LIVE_MAX_AGE_MS = 15 * 60 * 1000;    // Canlı GPS verisini 15 dk boyunca güzergah üzerinde ilerleterek kullan
+const DURAK_PASSING_TTL_MS = 35 * 1000;          // durak.iett.gov.tr canlı varış süresi: 35 saniye
+const LIVE_GPS_TTL_MS = 120 * 1000;              // İBB SOAP GPS konumu: 120 saniye
 
 let cacheStore = {
-  routeStops: {}, // { [hatKodu]: { timestamp, stops } }
-  schedules: {},  // { [hatKodu]: { timestamp, schedule } }
-  liveBuses: {}   // { [hatKodu]: { timestamp, vehicles, rateLimitedUntil } }
+  routeStops: {},     // { [hatKodu]: { timestamp, stops } }
+  schedules: {},      // { [hatKodu]: { timestamp, schedule } }
+  liveBuses: {},      // { [hatKodu]: { timestamp, vehicles, rateLimitedUntil } }
+  passingDetails: {}, // { [durakKodu]: { timestamp, data } }
+  durakCookies: {},   // { [cookieName]: cookieVal }
+  captchaState: {
+    required: false,
+    imageBase64: null,
+    timestamp: 0,
+    lastError: null
+  }
 };
 
+const inflightPassingRequests = new Map();
 const inflightLiveRequests = new Map();
 
 function loadCacheFromDisk() {
@@ -26,11 +34,11 @@ function loadCacheFromDisk() {
       const raw = fs.readFileSync(CACHE_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
-        cacheStore = {
-          routeStops: parsed.routeStops || {},
-          schedules: parsed.schedules || {},
-          liveBuses: parsed.liveBuses || {}
-        };
+        cacheStore.routeStops = parsed.routeStops || {};
+        cacheStore.schedules = parsed.schedules || {};
+        cacheStore.liveBuses = parsed.liveBuses || {};
+        cacheStore.passingDetails = parsed.passingDetails || {};
+        cacheStore.durakCookies = parsed.durakCookies || {};
       }
     }
   } catch (e) {
@@ -40,7 +48,14 @@ function loadCacheFromDisk() {
 
 function saveCacheToDisk() {
   try {
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(cacheStore), 'utf-8');
+    const toSave = {
+      routeStops: cacheStore.routeStops,
+      schedules: cacheStore.schedules,
+      liveBuses: cacheStore.liveBuses,
+      passingDetails: cacheStore.passingDetails,
+      durakCookies: cacheStore.durakCookies
+    };
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(toSave), 'utf-8');
   } catch (e) {
     // Salt okunur ortamda sessizce geç
   }
@@ -49,7 +64,220 @@ function saveCacheToDisk() {
 loadCacheFromDisk();
 
 /**
- * Haversine formülü ile iki koordinat arası mesafe (km)
+ * Çerezleri (Set-Cookie) saklar ve Cookie başlığı üretir
+ */
+function updateDurakCookies(setCookieArray) {
+  if (!Array.isArray(setCookieArray)) return;
+  for (const raw of setCookieArray) {
+    const kv = String(raw).split(';')[0];
+    const eqIdx = kv.indexOf('=');
+    if (eqIdx > 0) {
+      const name = kv.slice(0, eqIdx).trim();
+      const val = kv.slice(eqIdx + 1).trim();
+      cacheStore.durakCookies[name] = val;
+    }
+  }
+  saveCacheToDisk();
+}
+
+function getDurakCookieHeader() {
+  return Object.entries(cacheStore.durakCookies)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('; ');
+}
+
+/**
+ * durak.iett.gov.tr için HTTPS istek yardımcısı
+ */
+function durakRequest(reqPath, method = 'POST', payloadObj = null, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const bodyStr = payloadObj ? JSON.stringify(payloadObj) : '';
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Accept': 'application/json, text/javascript, */*; q=0.01',
+      'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Origin': 'https://durak.iett.gov.tr',
+      'Referer': 'https://durak.iett.gov.tr/',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    if (method === 'POST') {
+      headers['Content-Type'] = 'application/json; charset=UTF-8';
+      headers['Content-Length'] = Buffer.byteLength(bodyStr);
+    }
+
+    const cookieHdr = getDurakCookieHeader();
+    if (cookieHdr) {
+      headers['Cookie'] = cookieHdr;
+    }
+
+    const req = https.request({
+      hostname: 'durak.iett.gov.tr',
+      port: 443,
+      path: reqPath,
+      method,
+      headers,
+      timeout: timeoutMs,
+      rejectUnauthorized: false
+    }, (res) => {
+      if (res.headers['set-cookie']) {
+        updateDurakCookies(res.headers['set-cookie']);
+      }
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, data: body }));
+    });
+
+    req.on('error', err => reject(err));
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('durak.iett.gov.tr zaman aşımı'));
+    });
+
+    if (method === 'POST' && bodyStr) {
+      req.write(bodyStr);
+    }
+    req.end();
+  });
+}
+
+/**
+ * durak.iett.gov.tr üzerinden yeni doğrulama kodu (Captcha) alır
+ */
+async function generateDurakCaptcha(forceRefresh = false) {
+  const now = Date.now();
+  // Son 40 saniye içinde alınmış geçerli bir captcha varsa tekrar çekme (Captcha ömrü 60 sn)
+  if (!forceRefresh && cacheStore.captchaState.imageBase64 && (now - cacheStore.captchaState.timestamp < 40000)) {
+    return cacheStore.captchaState;
+  }
+
+  try {
+    // Çerez yoksa önce ana sayfayı ziyaret et
+    if (Object.keys(cacheStore.durakCookies).length === 0) {
+      await durakRequest('/?durakKodu=205671', 'GET');
+    }
+
+    const res = await durakRequest('/Home/Captcha', 'POST', null);
+    if (res.status === 200 && res.data) {
+      const parsed = JSON.parse(res.data);
+      if (parsed && parsed.isSuccess && parsed.captchaImage) {
+        cacheStore.captchaState = {
+          required: true,
+          imageBase64: parsed.captchaImage,
+          timestamp: Date.now(),
+          lastError: cacheStore.captchaState.lastError
+        };
+        return cacheStore.captchaState;
+      }
+    }
+  } catch (err) {
+    console.error('Captcha alınırken hata:', err.message);
+  }
+  return cacheStore.captchaState;
+}
+
+/**
+ * Kullanıcının girdiği 6 haneli doğrulama kodunu durak.iett.gov.tr'ye gönderir
+ */
+async function submitDurakCaptcha(captchaText, stationCode = '205671') {
+  try {
+    const cleanText = String(captchaText || '').trim();
+    if (!cleanText) {
+      return { isSuccess: false, message: 'Lütfen doğrulama kodunu girin.' };
+    }
+
+    const res = await durakRequest('/Home/Control', 'POST', {
+      StationCode: String(stationCode),
+      CaptchaText: cleanText
+    });
+
+    const parsed = JSON.parse(res.data);
+    if (parsed && (parsed.isSuccess || parsed.IsSuccess)) {
+      cacheStore.captchaState = {
+        required: false,
+        imageBase64: null,
+        timestamp: 0,
+        lastError: null
+      };
+      // Doğrulama başarılı olunca durak önbelleğini sıfırla ki anında taze veri çekilsin
+      cacheStore.passingDetails = {};
+      saveCacheToDisk();
+      return { isSuccess: true };
+    }
+
+    const msg = (parsed && parsed.message) || 'Hatalı kod veya süre doldu, yeni kod üretildi.';
+    cacheStore.captchaState.lastError = msg;
+    await generateDurakCaptcha(true);
+    return {
+      isSuccess: false,
+      message: msg,
+      captchaImage: cacheStore.captchaState.imageBase64
+    };
+  } catch (err) {
+    return { isSuccess: false, message: 'Doğrulama sırasında ağ hatası: ' + err.message };
+  }
+}
+
+/**
+ * durak.iett.gov.tr /Home/GetPassingDetail servisinden resmi varış dakikalarını çeker
+ */
+async function fetchOfficialPassingDetail(durakKodu) {
+  const now = Date.now();
+  const cached = cacheStore.passingDetails[durakKodu];
+
+  if (cached && cached.data && (now - cached.timestamp < DURAK_PASSING_TTL_MS)) {
+    return { ok: true, data: cached.data, fromCache: true };
+  }
+
+  if (inflightPassingRequests.has(durakKodu)) {
+    return inflightPassingRequests.get(durakKodu);
+  }
+
+  const reqPromise = (async () => {
+    try {
+      const res = await durakRequest('/Home/GetPassingDetail', 'POST', {
+        StationCode: String(durakKodu)
+      });
+
+      if (res.status === 200 && res.data) {
+        const parsed = JSON.parse(res.data);
+        const isExpired = parsed.isTokenExpired ?? parsed.IsTokenExpired;
+        const isSuccess = parsed.isSuccess ?? parsed.IsSuccess;
+        const data = parsed.data ?? parsed.Data;
+
+        if (isExpired) {
+          await generateDurakCaptcha(false);
+          return { ok: false, tokenExpired: true };
+        }
+
+        if (isSuccess && data) {
+          cacheStore.captchaState.required = false;
+          cacheStore.captchaState.lastError = null;
+          cacheStore.passingDetails[durakKodu] = {
+            timestamp: Date.now(),
+            data
+          };
+          saveCacheToDisk();
+          return { ok: true, data, fromCache: false };
+        }
+      }
+      return { ok: false };
+    } catch (err) {
+      if (cached && cached.data && (now - cached.timestamp < 5 * 60 * 1000)) {
+        return { ok: true, data: cached.data, fromCache: true };
+      }
+      return { ok: false };
+    } finally {
+      inflightPassingRequests.delete(durakKodu);
+    }
+  })();
+
+  inflightPassingRequests.set(durakKodu, reqPromise);
+  return reqPromise;
+}
+
+/**
+ * Haversine mesafe hesabı (km)
  */
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -64,7 +292,7 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
 }
 
 /**
- * Sıfır bağımlılıklı standart SOAP/HTTPS POST isteği
+ * Standart SOAP isteği (DurakDetay_GYY, PlanlananSeferSaati ve SeferGerceklesme için)
  */
 function soapCall(urlStr, soapAction, bodyXml, timeoutMs = config.api.timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -77,7 +305,7 @@ function soapCall(urlStr, soapAction, bodyXml, timeoutMs = config.api.timeoutMs)
   </soap:Body>
 </soap:Envelope>`;
 
-      const options = {
+      const req = https.request({
         hostname: parsedUrl.hostname,
         port: parsedUrl.port || 443,
         path: parsedUrl.pathname + parsedUrl.search,
@@ -89,9 +317,7 @@ function soapCall(urlStr, soapAction, bodyXml, timeoutMs = config.api.timeoutMs)
         },
         timeout: timeoutMs,
         rejectUnauthorized: false
-      };
-
-      const req = https.request(options, (res) => {
+      }, (res) => {
         let body = '';
         res.on('data', chunk => { body += chunk; });
         res.on('end', () => resolve({ status: res.statusCode, data: body }));
@@ -100,7 +326,7 @@ function soapCall(urlStr, soapAction, bodyXml, timeoutMs = config.api.timeoutMs)
       req.on('error', err => reject(err));
       req.on('timeout', () => {
         req.destroy();
-        reject(new Error('İstek zaman aşımına uğradı'));
+        reject(new Error('SOAP zaman aşımı'));
       });
 
       req.write(envelope);
@@ -111,9 +337,6 @@ function soapCall(urlStr, soapAction, bodyXml, timeoutMs = config.api.timeoutMs)
   });
 }
 
-/**
- * Hattın tüm durak dizilimini çeker ve 12 saat önbellekte tutar
- */
 async function getHatStopSequence(hatKodu) {
   const cached = cacheStore.routeStops[hatKodu];
   if (cached && cached.stops && cached.stops.length > 0 && (Date.now() - cached.timestamp < STATIC_CACHE_TTL_MS)) {
@@ -146,14 +369,11 @@ async function getHatStopSequence(hatKodu) {
       return stops;
     }
   } catch (err) {
-    console.error(`DurakDetay_GYY (${hatKodu}) hatası:`, err.message);
+    // Sessiz geç
   }
   return cached && cached.stops ? cached.stops : [];
 }
 
-/**
- * Hattın resmi planlanan sefer kalkış saatlerini çeker ve 12 saat önbellekte tutar
- */
 async function getPlannedSchedule(hatKodu) {
   const cached = cacheStore.schedules[hatKodu];
   if (cached && cached.schedule && cached.schedule.length > 0 && (Date.now() - cached.timestamp < STATIC_CACHE_TTL_MS)) {
@@ -177,68 +397,28 @@ async function getPlannedSchedule(hatKodu) {
       }
     }
   } catch (err) {
-    console.error(`PlanlananSeferSaati (${hatKodu}) hatası:`, err.message);
+    // Sessiz geç
   }
   return cached && cached.schedule ? cached.schedule : [];
 }
 
-/**
- * Hattın şu anki saat diliminde aktif bir seferi olup olmadığını kontrol eder
- */
-function isLinePotentiallyActiveNow(schedule, targetYon, nowMinutesOfDay, gunTipi) {
-  if (!schedule || schedule.length === 0) return true;
-  const todaysDepartures = schedule
-    .filter(x => x.SYON === targetYon && x.SGUNTIPI === gunTipi)
-    .map(x => {
-      const parts = String(x.DT || '').split(':');
-      return parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
-    })
-    .filter(m => !isNaN(m));
-
-  if (todaysDepartures.length === 0) return true;
-  return todaysDepartures.some(depMin => nowMinutesOfDay >= (depMin - 5) && nowMinutesOfDay <= (depMin + 85));
-}
-
-/**
- * Hattın anlık aktif otobüs konumlarını (GetHatOtoKonum_json) Rate-Limit korumalı çeker
- */
-async function fetchLiveBuses(hatKodu, forceSkipRemote = false) {
+async function fetchLiveBusesSOAP(hatKodu) {
   const now = Date.now();
   const cached = cacheStore.liveBuses[hatKodu];
 
-  if (forceSkipRemote) {
-    return { ok: true, fromCache: true, ageSeconds: 0, vehicles: [] };
+  if (cached && cached.vehicles && cached.vehicles.length > 0 && (now - cached.timestamp < LIVE_GPS_TTL_MS)) {
+    return { ok: true, vehicles: cached.vehicles };
   }
 
-  // 1. Önbellek taze ise (son 3 dakika içinde çekildiyse) doğrudan önbellekten dön (0 API isteği!)
-  if (cached && cached.vehicles && cached.vehicles.length > 0 && (now - cached.timestamp < LIVE_POLL_INTERVAL_MS)) {
-    return {
-      ok: true,
-      fromCache: true,
-      ageSeconds: Math.round((now - cached.timestamp) / 1000),
-      vehicles: cached.vehicles
-    };
-  }
-
-  // Eğer İBB Rate Limit bekleme süresindeysek uzak sunucuyu yorma
   if (cached && cached.rateLimitedUntil && now < cached.rateLimitedUntil) {
-    if (cached.vehicles && cached.vehicles.length > 0 && (now - cached.timestamp < STALE_LIVE_MAX_AGE_MS)) {
-      return {
-        ok: true,
-        fromCache: true,
-        rateLimited: true,
-        ageSeconds: Math.round((now - cached.timestamp) / 1000),
-        vehicles: cached.vehicles
-      };
-    }
-    return { ok: false, rateLimited: true, vehicles: [] };
+    return { ok: false, vehicles: cached.vehicles || [] };
   }
 
   if (inflightLiveRequests.has(hatKodu)) {
     return inflightLiveRequests.get(hatKodu);
   }
 
-  const requestPromise = (async () => {
+  const reqPromise = (async () => {
     try {
       const res = await soapCall(
         config.api.seferGerceklesmeUrl,
@@ -250,126 +430,39 @@ async function fetchLiveBuses(hatKodu, forceSkipRemote = false) {
       if (res.status === 200 && match && match[1]) {
         const parsed = JSON.parse(match[1]);
         if (Array.isArray(parsed)) {
-          cacheStore.liveBuses[hatKodu] = {
-            timestamp: Date.now(),
-            vehicles: parsed,
-            rateLimitedUntil: 0
-          };
+          cacheStore.liveBuses[hatKodu] = { timestamp: Date.now(), vehicles: parsed, rateLimitedUntil: 0 };
           saveCacheToDisk();
-          return {
-            ok: true,
-            fromCache: false,
-            ageSeconds: 0,
-            vehicles: parsed
-          };
+          return { ok: true, vehicles: parsed };
         }
       }
 
-      // İBB Layer7 Rate Limit döndüyse 5 dakika boyunca tekrar sorma, kotanın sıfırlanmasına izin ver
       cacheStore.liveBuses[hatKodu] = {
         timestamp: cached ? cached.timestamp : 0,
         vehicles: cached && cached.vehicles ? cached.vehicles : [],
-        rateLimitedUntil: Date.now() + 5 * 60 * 1000
+        rateLimitedUntil: Date.now() + 3 * 60 * 1000
       };
-      saveCacheToDisk();
-
-      if (cached && cached.vehicles && cached.vehicles.length > 0 && (now - cached.timestamp < STALE_LIVE_MAX_AGE_MS)) {
-        return {
-          ok: true,
-          fromCache: true,
-          rateLimited: true,
-          ageSeconds: Math.round((now - cached.timestamp) / 1000),
-          vehicles: cached.vehicles
-        };
-      }
-
-      return { ok: false, rateLimited: true, vehicles: [] };
-    } catch (err) {
-      if (cached && cached.vehicles && cached.vehicles.length > 0 && (now - cached.timestamp < STALE_LIVE_MAX_AGE_MS)) {
-        return {
-          ok: true,
-          fromCache: true,
-          ageSeconds: Math.round((now - cached.timestamp) / 1000),
-          vehicles: cached.vehicles
-        };
-      }
+      return { ok: false, vehicles: [] };
+    } catch (e) {
       return { ok: false, vehicles: [] };
     } finally {
       inflightLiveRequests.delete(hatKodu);
     }
   })();
 
-  inflightLiveRequests.set(hatKodu, requestPromise);
-  return requestPromise;
+  inflightLiveRequests.set(hatKodu, reqPromise);
+  return reqPromise;
 }
 
 /**
- * Canlı GPS servisi İBB tarafından geçici Rate-Limit'e alındığında,
- * İETT'nin resmi bugünkü kalkış tarifesi (PlanlananSeferSaati) + gerçek durak koordinatları (DurakDetay_GYY)
- * üzerinden şu an yolda olan gerçek seferlerin hangi durakta olduğunu ve kalan dakikasını hesaplar.
- */
-function computeScheduleTrackedBuses(schedule, routeStops, targetStopMeta, stop, nowMinutesOfDay, nowSeconds, gunTipi, calculateRouteDistance) {
-  if (!schedule || !routeStops || routeStops.length === 0 || !targetStopMeta) return [];
-
-  const targetYon = targetStopMeta.yon;
-  const targetSira = targetStopMeta.sira;
-  const totalStopsToTarget = targetSira - 1;
-  if (totalStopsToTarget <= 0) return [];
-
-  // İlk duraktan hedef durağa toplam gerçek yol mesafesi (km) ve toplam varış süresi (dk)
-  const totalRouteKm = calculateRouteDistance(1, routeStops[0].lat, routeStops[0].lng);
-  const totalTravelMin = (totalRouteKm * 2.4) + (totalStopsToTarget * 0.45);
-
-  const todaysDepartures = schedule
-    .filter(x => x.SYON === targetYon && x.SGUNTIPI === gunTipi)
-    .map(x => {
-      const parts = String(x.DT || '').split(':');
-      return {
-        dt: x.DT,
-        depMin: parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10)
-      };
-    })
-    .filter(x => !isNaN(x.depMin));
-
-  const trackedBuses = [];
-  const exactNowMin = nowMinutesOfDay + (nowSeconds / 60);
-
-  for (const dep of todaysDepartures) {
-    const elapsedMin = exactNowMin - dep.depMin;
-    // Sefer ilk duraktan kalkmış ve henüz hedef durağı geçmemişse:
-    if (elapsedMin >= 0 && elapsedMin <= totalTravelMin) {
-      const progressRatio = Math.min(1, elapsedMin / totalTravelMin);
-      const currentSira = Math.max(2, Math.min(targetSira, 1 + Math.round(progressRatio * totalStopsToTarget)));
-      const currentStopObj = routeStops.find(s => s.sira === currentSira) || routeStops[0];
-
-      const kalanDurak = targetSira - currentSira;
-      const kalanMesafeKm = calculateRouteDistance(currentSira, currentStopObj.lat, currentStopObj.lng);
-      const kalanDakika = kalanDurak === 0 ? 0 : Math.max(1, Math.round(totalTravelMin - elapsedMin));
-
-      trackedBuses.push({
-        kapiNo: `${dep.dt} Seferi`,
-        kalanDakika,
-        kalanDurak,
-        bulunduguDurak: currentStopObj.durakAdi,
-        bulunduguSira: currentSira,
-        hedefYon: stop.hedefYon,
-        mesafeKm: kalanMesafeKm.toFixed(1),
-        kaynak: 'tarife-takip'
-      });
-    }
-  }
-
-  trackedBuses.sort((a, b) => a.kalanDakika - b.kalanDakika);
-  return trackedBuses.slice(0, 3);
-}
-
-/**
- * Belirli bir durak için gerçek zamanlı yaklaşan araçları ve resmi kalkış saatlerini hesaplar
+ * Ana Veri Birleştirici:
+ * 1. Öncelik: durak.iett.gov.tr (/Home/GetPassingDetail) -> %100 Resmi İETT Dakikası, Kapı No, Klima/USB/WiFi
+ * 2. Zenginleştirme / Yedek: SeferGerceklesme.asmx + DurakDetay_GYY -> Aracın şu an hangi durakta olduğu ve kalan durak sayısı
  */
 async function getDurakVarisBilgisi(stop) {
-  const [allStops, schedule] = await Promise.all([
+  const [allStops, schedule, officialPassing] = await Promise.all([
     getHatStopSequence(stop.hatKodu),
-    getPlannedSchedule(stop.hatKodu)
+    getPlannedSchedule(stop.hatKodu),
+    fetchOfficialPassingDetail(stop.durakKodu)
   ]);
 
   const targetStopMeta = allStops.find(s => s.durakKodu === String(stop.durakKodu));
@@ -382,14 +475,11 @@ async function getDurakVarisBilgisi(stop) {
 
   const firstStop = routeStops.length > 0 ? routeStops[0] : null;
 
+  // Resmi tarife saatleri
   const istanbulNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Istanbul" }));
   const dayOfWeek = istanbulNow.getDay();
   const gunTipi = dayOfWeek === 0 ? 'P' : (dayOfWeek === 6 ? 'C' : 'I');
-  const nowHours = istanbulNow.getHours();
-  const nowMinutes = istanbulNow.getMinutes();
-  const nowSeconds = istanbulNow.getSeconds();
-  const nowMinutesOfDay = nowHours * 60 + nowMinutes;
-  const nowHHMM = String(nowHours).padStart(2, '0') + ':' + String(nowMinutes).padStart(2, '0');
+  const nowHHMM = String(istanbulNow.getHours()).padStart(2, '0') + ':' + String(istanbulNow.getMinutes()).padStart(2, '0');
 
   const upcomingDepartures = schedule
     .filter(x => x.SYON === targetYon && x.SGUNTIPI === gunTipi && x.DT >= nowHHMM)
@@ -397,120 +487,150 @@ async function getDurakVarisBilgisi(stop) {
     .filter((v, i, a) => a.indexOf(v) === i)
     .slice(0, 4);
 
-  function calculateRouteDistance(busSira, busLat, busLng) {
-    if (!targetStopMeta || routeStops.length === 0) {
-      return calculateDistanceKm(busLat, busLng, stop.koordinat.lat, stop.koordinat.lng);
+  // SOAP GPS verisi varsa kapı numarasına göre hangi durakta olduğunu eşleştirmek için çek
+  const soapGps = await fetchLiveBusesSOAP(stop.hatKodu);
+  const gpsByDoor = {};
+  if (soapGps.vehicles && soapGps.vehicles.length > 0 && routeStops.length > 0) {
+    for (const v of soapGps.vehicles) {
+      const door = String(v.kapino || v.KapiNo || '').trim();
+      const yakinKod = String(v.yakinDurakKodu || '').trim();
+      const stObj = routeStops.find(s => s.durakKodu === yakinKod);
+      if (door && stObj && targetSira && stObj.sira <= targetSira) {
+        gpsByDoor[door] = {
+          bulunduguDurak: stObj.durakAdi,
+          kalanDurak: targetSira - stObj.sira
+        };
+      }
     }
-    const startIdx = routeStops.findIndex(s => s.sira === busSira);
-    const targetIdx = routeStops.findIndex(s => s.sira === targetSira);
-    if (startIdx === -1 || targetIdx === -1 || startIdx >= targetIdx) return 0;
-
-    let totalKm = calculateDistanceKm(busLat, busLng, routeStops[startIdx + 1].lat, routeStops[startIdx + 1].lng);
-    for (let i = startIdx + 1; i < targetIdx; i++) {
-      totalKm += calculateDistanceKm(routeStops[i].lat, routeStops[i].lng, routeStops[i + 1].lat, routeStops[i + 1].lng);
-    }
-    return totalKm;
   }
 
-  const isPotentiallyActive = isLinePotentiallyActiveNow(schedule, targetYon, nowMinutesOfDay, gunTipi);
-  const liveResult = await fetchLiveBuses(stop.hatKodu, !isPotentiallyActive);
+  // 1. Resmi durak.iett.gov.tr verisi geldiyse:
+  if (officialPassing.ok && officialPassing.data) {
+    const rawArrivals = officialPassing.data.stopArrivals || officialPassing.data.StopArrivals || [];
+    const targetHatUpper = String(stop.hatKodu).trim().toUpperCase();
 
-  let approachingBuses = [];
-  let waitingAtTerminalBuses = [];
-  let veriKaynagi = 'canli';
+    // Hedef hatta ait yaklaşan otobüsler
+    const matchingLineBuses = [];
+    // Aynı durağa yaklaşan diğer hatlar (bilgi zenginliği için)
+    const otherLinesAtStop = [];
 
-  if (liveResult.ok && liveResult.vehicles.length > 0 && routeStops.length > 0 && targetStopMeta) {
-    for (const v of liveResult.vehicles) {
-      const guzergah = String(v.guzergahkodu || '');
-      if (guzergah && !guzergah.includes(`_${targetYon}_`)) {
-        continue;
+    for (const item of rawArrivals) {
+      const lineCode = String(item.lineCode || item.LineCode || '').trim().toUpperCase();
+      const routeText = String(item.lineType || item.LineType || '');
+      const doorNum = String(item.doorNumber || item.DoorNumber || '-').trim();
+      const minute = parseInt(item.minute ?? item.Minute ?? 0, 10);
+
+      const features = [];
+      if ((item.haveAir || item.HaveAir) === 1) features.push('❄️ Klima');
+      if ((item.haveUsb || item.HaveUsb) === 1) features.push('🔌 USB');
+      if ((item.haveWifi || item.HaveWifi) === 1) features.push('📶 WiFi');
+      if ((item.haveAccessibility || item.HaveAccessibility) === 1) features.push('♿ Engelli Uygun');
+
+      const gpsExtra = gpsByDoor[doorNum];
+
+      const busEntry = {
+        hatKodu: lineCode,
+        kapiNo: doorNum,
+        kalanDakika: minute,
+        kalanDurak: gpsExtra ? gpsExtra.kalanDurak : null,
+        bulunduguDurak: gpsExtra ? gpsExtra.bulunduguDurak : null,
+        hedefYon: routeText || stop.hedefYon,
+        ozellikler: features,
+        kaynak: 'resmi-canli'
+      };
+
+      // Tam hat kodu eşleşmesi veya aynı hattın alt varyantı (örn. 19)
+      if (lineCode === targetHatUpper || routeText.toUpperCase().startsWith(targetHatUpper + ' ')) {
+        matchingLineBuses.push(busEntry);
+      } else {
+        otherLinesAtStop.push(busEntry);
       }
+    }
 
+    matchingLineBuses.sort((a, b) => a.kalanDakika - b.kalanDakika);
+    otherLinesAtStop.sort((a, b) => a.kalanDakika - b.kalanDakika);
+
+    return {
+      durak: {
+        ...stop,
+        siraNo: targetSira,
+        ilkDurakAdi: firstStop ? firstStop.durakAdi : 'İlk Durak'
+      },
+      baglantiDurumu: 'resmi-canli',
+      otobusler: matchingLineBuses.slice(0, 3),
+      digerHatlar: otherLinesAtStop.slice(0, 3),
+      ilkDuraktaBekleyenSayisi: 0,
+      siradakiKalkislar: upcomingDepartures
+    };
+  }
+
+  // 2. Eğer durak.iett.gov.tr henüz doğrulanmadıysa ve SOAP GPS aktifse:
+  if (soapGps.ok && soapGps.vehicles.length > 0 && routeStops.length > 0 && targetStopMeta) {
+    const approachingBuses = [];
+    for (const v of soapGps.vehicles) {
+      const guzergah = String(v.guzergahkodu || '');
+      if (guzergah && !guzergah.includes(`_${targetYon}_`)) continue;
+
+      const yakinKod = String(v.yakinDurakKodu || '').trim();
+      const currentStop = routeStops.find(s => s.durakKodu === yakinKod);
+      if (!currentStop || currentStop.sira <= 1 || currentStop.sira > targetSira) continue;
+
+      const kalanDurak = targetSira - currentStop.sira;
       const lat = parseFloat(v.enlem || v.Enlem);
       const lng = parseFloat(v.boylam || v.Boylam);
-      const yakinKod = String(v.yakinDurakKodu || '').trim();
+      const distKm = calculateDistanceKm(lat, lng, stop.koordinat.lat, stop.koordinat.lng);
+      const kalanDakika = kalanDurak === 0 ? 0 : Math.max(1, Math.round((distKm * 2.5) + (kalanDurak * 0.45)));
 
-      let currentStop = routeStops.find(s => s.durakKodu === yakinKod);
-
-      if (!currentStop && !isNaN(lat) && !isNaN(lng)) {
-        let bestStop = null;
-        let minDist = 0.6;
-        for (const rs of routeStops) {
-          const d = calculateDistanceKm(lat, lng, rs.lat, rs.lng);
-          if (d < minDist) {
-            minDist = d;
-            bestStop = rs;
-          }
-        }
-        currentStop = bestStop;
-      }
-
-      if (!currentStop) continue;
-
-      // Önbellek yaşına göre aracın ilerlemesini hesaba kat
-      const ageMin = (liveResult.ageSeconds || 0) / 60;
-      const progressedStops = currentStop.sira > 1 ? Math.floor(ageMin / 1.15) : 0;
-      const effectiveSira = currentStop.sira + progressedStops;
-
-      if (effectiveSira > targetSira) {
-        continue;
-      }
-
-      const effectiveStopObj = routeStops.find(s => s.sira === effectiveSira) || currentStop;
-      const kalanDurak = targetSira - effectiveSira;
-      const mesafeKm = calculateRouteDistance(effectiveSira, effectiveStopObj.lat, effectiveStopObj.lng);
-
-      const rawMinutes = (mesafeKm * 2.4) + (kalanDurak * 0.45);
-      const kalanDakika = kalanDurak === 0 ? 0 : Math.max(1, Math.round(rawMinutes));
-
-      const busData = {
+      approachingBuses.push({
+        hatKodu: stop.hatKodu,
         kapiNo: v.kapino || v.KapiNo || 'İETT',
         kalanDakika,
         kalanDurak,
-        bulunduguDurak: effectiveStopObj.durakAdi,
-        bulunduguSira: effectiveSira,
+        bulunduguDurak: currentStop.durakAdi,
         hedefYon: v.yon || stop.hedefYon,
-        mesafeKm: mesafeKm.toFixed(1),
-        kaynak: 'canli'
-      };
-
-      if (effectiveSira === 1) {
-        waitingAtTerminalBuses.push(busData);
-      } else {
-        approachingBuses.push(busData);
-      }
+        ozellikler: [],
+        kaynak: 'gps-canli'
+      });
     }
-    approachingBuses.sort((a, b) => a.kalanDurak - b.kalanDurak);
-  } else if (!liveResult.ok && isPotentiallyActive) {
-    // Canlı GPS servisi İBB Layer7 Rate-Limit beklemesindeyse,
-    // Resmi kalkış saatlerinden (PlanlananSeferSaati) o an yolda olan gerçek seferi takip et!
-    approachingBuses = computeScheduleTrackedBuses(
-      schedule,
-      routeStops,
-      targetStopMeta,
-      stop,
-      nowMinutesOfDay,
-      nowSeconds,
-      gunTipi,
-      calculateRouteDistance
-    );
-    veriKaynagi = 'tarife-takip';
+
+    approachingBuses.sort((a, b) => a.kalanDakika - b.kalanDakika);
+
+    return {
+      durak: {
+        ...stop,
+        siraNo: targetSira,
+        ilkDurakAdi: firstStop ? firstStop.durakAdi : 'İlk Durak'
+      },
+      baglantiDurumu: 'gps-canli',
+      otobusler: approachingBuses.slice(0, 3),
+      digerHatlar: [],
+      ilkDuraktaBekleyenSayisi: 0,
+      siradakiKalkislar: upcomingDepartures
+    };
   }
 
+  // 3. Doğrulama bekleniyor durumu
   return {
     durak: {
       ...stop,
       siraNo: targetSira,
       ilkDurakAdi: firstStop ? firstStop.durakAdi : 'İlk Durak'
     },
-    baglantiDurumu: 'aktif',
-    veriKaynagi,
-    otobusler: approachingBuses.slice(0, 3),
-    ilkDuraktaBekleyenSayisi: waitingAtTerminalBuses.length,
+    baglantiDurumu: cacheStore.captchaState.required ? 'dogrulama-gerekli' : 'beklemede',
+    otobusler: [],
+    digerHatlar: [],
+    ilkDuraktaBekleyenSayisi: 0,
     siradakiKalkislar: upcomingDepartures
   };
 }
 
+function getCaptchaState() {
+  return cacheStore.captchaState;
+}
+
 module.exports = {
-  getDurakVarisBilgisi
+  getDurakVarisBilgisi,
+  getCaptchaState,
+  generateDurakCaptcha,
+  submitDurakCaptcha
 };

@@ -1,12 +1,16 @@
 const http = require('http');
 const { URL } = require('url');
 const config = require('./config');
-const { getDurakVarisBilgisi } = require('./services/iettService');
+const {
+  getDurakVarisBilgisi,
+  getCaptchaState,
+  generateDurakCaptcha,
+  submitDurakCaptcha
+} = require('./services/iettService');
 const { renderDashboard } = require('./views/dashboard');
 
 const PORT = process.env.PORT || 3000;
 
-// Tarih ve Saat biçimlendirici (İstanbul UTC+3)
 function getFormattedDateTime() {
   const now = new Date();
   const istanbulTime = new Date(now.toLocaleString("en-US", { timeZone: "Europe/Istanbul" }));
@@ -29,26 +33,47 @@ function getFormattedDateTime() {
   return { currentTime, currentDate };
 }
 
-// Ana HTTP Sunucusu (Sıfır harici paket, Node.js yerleşik)
 const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = parsedUrl.pathname;
 
-  // 1. Ana Dashboard Arayüzü
+  // 1. İETT Resmi Canlı Veri (durak.iett.gov.tr) Doğrulama Kodu Gönderimi
+  if (pathname === '/api/verify-captcha') {
+    const code = parsedUrl.searchParams.get('code') || '';
+    await submitDurakCaptcha(code, config.stops[0].durakKodu);
+    res.writeHead(302, { Location: '/' });
+    res.end();
+    return;
+  }
+
+  // 2. Yeni Doğrulama Kodu İsteği
+  if (pathname === '/api/refresh-captcha') {
+    await generateDurakCaptcha(true);
+    res.writeHead(302, { Location: '/' });
+    res.end();
+    return;
+  }
+
+  // 3. Ana Dashboard Arayüzü
   if (pathname === '/' || pathname === '/index.html') {
     try {
-      const stopsData = await Promise.all(
-        config.stops.map(stop => getDurakVarisBilgisi(stop))
-      );
+      // Sıralı sorgula (Aynı anda çerez çakışmasını önlemek için)
+      const stopsData = [];
+      for (const stop of config.stops) {
+        const info = await getDurakVarisBilgisi(stop);
+        stopsData.push(info);
+      }
 
       const { currentTime, currentDate } = getFormattedDateTime();
+      const captchaState = getCaptchaState();
 
       const html = renderDashboard({
         title: config.siteTitle,
         refreshSeconds: config.refreshIntervalSeconds,
         currentTime,
         currentDate,
-        stopsData
+        stopsData,
+        captchaState
       });
 
       res.writeHead(200, {
@@ -64,12 +89,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 2. JSON API Endpoint (Home Assistant / Geliştiriciler)
+  // 4. JSON API Endpoint
   if (pathname === '/api/status') {
     try {
-      const stopsData = await Promise.all(
-        config.stops.map(stop => getDurakVarisBilgisi(stop))
-      );
+      const stopsData = [];
+      for (const stop of config.stops) {
+        stopsData.push(await getDurakVarisBilgisi(stop));
+      }
       res.writeHead(200, {
         'Content-Type': 'application/json; charset=utf-8',
         'Access-Control-Allow-Origin': '*'
@@ -77,6 +103,7 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({
         success: true,
         timestamp: new Date().toISOString(),
+        captchaRequired: getCaptchaState().required,
         stops: stopsData
       }));
     } catch (error) {
@@ -86,29 +113,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 3. Sağlık Kontrolü (Render/Docker)
+  // 5. Sağlık Kontrolü
   if (pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('OK');
     return;
   }
 
-  // 404
   res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('Sayfa bulunamadı');
 });
 
-// Yerel sunucu başlatma
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n======================================================`);
-    console.log(`🚍 DurakPano Servisi Başlatıldı!`);
+    console.log(`🚍 DurakPano Servisi Başlatıldı! (Resmi durak.iett.gov.tr Entegrasyonu)`);
     console.log(`📡 Yerel Adres: http://localhost:${PORT}`);
-    console.log(`📱 Ağdaki Cihazlar İçin Adres: http://YEREL_IP_ADRESINIZ:${PORT}`);
     console.log(`🚏 Takip: 205671 (Hat 19) & 213801 (Hat 14TM)`);
     console.log(`======================================================\n`);
   });
 }
 
-// Vercel serverless export
 module.exports = server;

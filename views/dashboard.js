@@ -1,38 +1,72 @@
 function renderDashboard(data) {
-  const { title, refreshSeconds, currentTime, currentDate, stopsData } = data;
+  const { title, refreshSeconds, currentTime, currentDate, stopsData, captchaState } = data;
+  const isCaptchaOpen = Boolean(captchaState && captchaState.required && captchaState.imageBase64);
+
+  // Captcha doğrulama çubuğu (Sadece durak.iett.gov.tr oturumu ilk açıldığında veya süresi dolduğunda görünür)
+  const captchaBannerHtml = isCaptchaOpen ? `
+    <div class="captcha-banner">
+      <div class="cap-left">
+        <span class="cap-badge">🔒 İETT CANLI VERİ DOĞRULAMASI</span>
+        <span class="cap-desc">Resmi <strong>durak.iett.gov.tr</strong> dakikalarını çekmek için görseldeki 6 haneli kodu girin:</span>
+        ${captchaState.lastError ? `<span class="cap-err">⚠️ ${captchaState.lastError}</span>` : ''}
+      </div>
+      <form class="cap-form" method="GET" action="/api/verify-captcha">
+        <img class="cap-img" src="data:image/jpeg;base64,${captchaState.imageBase64}" alt="Doğrulama Kodu" />
+        <input class="cap-input" type="text" name="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="Kodu girin" autocomplete="off" autofocus required />
+        <button class="cap-btn" type="submit">DOĞRULA</button>
+        <a class="cap-refresh" href="/api/refresh-captcha" title="Yeni Kod Al">🔄</a>
+      </form>
+    </div>
+  ` : '';
 
   const cardsHtml = stopsData.map(item => {
     const {
       durak,
       baglantiDurumu,
       otobusler,
-      ilkDuraktaBekleyenSayisi,
+      digerHatlar,
       siradakiKalkislar
     } = item;
 
     const hasLiveBus = otobusler && otobusler.length > 0;
-    const statusBadgeClass = hasLiveBus ? "badge-live" : "badge-standby";
-    const statusText = hasLiveBus
-      ? "● YOLDA ARAÇ VAR"
-      : (baglantiDurumu === "aktif" ? "● AKTİF SEFER YOK" : "⚠ BAĞLANTI HATASI");
+    let statusBadgeClass = "badge-standby";
+    let statusText = "● AKTİF ARAÇ YOK";
+
+    if (baglantiDurumu === "dogrulama-gerekli") {
+      statusBadgeClass = "badge-warn";
+      statusText = "🔒 DOĞRULAMA BEKLENİYOR";
+    } else if (hasLiveBus) {
+      statusBadgeClass = "badge-live";
+      statusText = "● RESMİ CANLI VERİ";
+    } else if (baglantiDurumu === "resmi-canli") {
+      statusBadgeClass = "badge-standby";
+      statusText = "● YAKLAŞAN ARAÇ YOK";
+    }
 
     let busListHtml = "";
 
     if (!hasLiveBus) {
-      const waitingInfo = ilkDuraktaBekleyenSayisi > 0
-        ? `<div class="waiting-note">🚌 İlk durakta (${durak.ilkDurakAdi}) kalkış bekleyen <strong>${ilkDuraktaBekleyenSayisi} araç</strong> var.</div>`
-        : "";
+      const msg = baglantiDurumu === "dogrulama-gerekli"
+        ? "Canlı varış sürelerini görmek için üstteki doğrulama kodunu girin."
+        : `Şu an <strong>${durak.hatKodu}</strong> hattında bu durağa yaklaşan araç bulunmuyor.`;
 
       busListHtml = `
         <div class="empty-state">
-          <div class="empty-title">Şu an durağa yaklaşan aktif araç bulunmuyor</div>
-          ${waitingInfo}
+          <div class="empty-title">${msg}</div>
         </div>
       `;
     } else {
       const firstBus = otobusler[0];
       const otherBuses = otobusler.slice(1);
-      const isAtStop = firstBus.kalanDurak === 0 || firstBus.kalanDakika === 0;
+      const isAtStop = firstBus.kalanDakika === 0;
+
+      const locationLine = firstBus.bulunduguDurak
+        ? `<div class="detail-location">📍 Durak: <strong>${firstBus.bulunduguDurak}</strong> ${firstBus.kalanDurak != null ? `(${firstBus.kalanDurak} durak kaldı)` : ''}</div>`
+        : `<div class="detail-location">🛣️ Güzergâh: <strong>${firstBus.hedefYon}</strong></div>`;
+
+      const featuresLine = firstBus.ozellikler && firstBus.ozellikler.length > 0
+        ? `<span class="feat-tags">${firstBus.ozellikler.join(' • ')}</span>`
+        : '';
 
       busListHtml = `
         <div class="primary-bus ${isAtStop ? 'bus-imminent' : ''}">
@@ -42,17 +76,9 @@ function renderDashboard(data) {
           </div>
           <div class="arrival-detail">
             <div class="detail-line">
-              ${isAtStop
-                ? '🟢 <strong>Araç şu an durakta!</strong>'
-                : `🚏 <strong>${firstBus.kalanDurak} durak</strong> kaldı <span class="dist-tag">(~${firstBus.mesafeKm} km)</span>`
-              }
+              🚍 Kapı No: <strong>${firstBus.kapiNo}</strong> ${featuresLine}
             </div>
-            <div class="detail-location">
-              📍 Bulunduğu Durak: <strong>${firstBus.bulunduguDurak}</strong>
-            </div>
-            <div class="detail-sub">
-              Kapı No: <strong>${firstBus.kapiNo}</strong> • Yön: ${firstBus.hedefYon}
-            </div>
+            ${locationLine}
           </div>
         </div>
       `;
@@ -60,11 +86,11 @@ function renderDashboard(data) {
       if (otherBuses.length > 0) {
         busListHtml += `
           <div class="secondary-buses">
-            <span class="sec-label">Arkadan Gelen:</span>
+            <span class="sec-label">Sonraki ${durak.hatKodu}:</span>
             <div class="sec-pills">
               ${otherBuses.map(b => `
                 <span class="sec-pill">
-                  <strong>~${b.kalanDakika} dk</strong> • ${b.kalanDurak} durak (${b.bulunduguDurak})
+                  <strong>${b.kalanDakika} dk</strong> (Kapı: ${b.kapiNo}${b.kalanDurak != null ? `, ${b.kalanDurak} durak` : ''})
                 </span>
               `).join('')}
             </div>
@@ -73,12 +99,27 @@ function renderDashboard(data) {
       }
     }
 
+    // Aynı durağa yaklaşan diğer hatlar (varsa)
+    let otherLinesHtml = "";
+    if (digerHatlar && digerHatlar.length > 0) {
+      otherLinesHtml = `
+        <div class="other-lines-bar">
+          <span class="other-label">Durağa Gelen Diğer Hatlar:</span>
+          <div class="other-pills">
+            ${digerHatlar.map(o => `
+              <span class="other-pill"><b>${o.hatKodu}</b>: ${o.kalanDakika} dk</span>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
     // İlk duraktan planlı kalkış saatleri satırı
     let scheduleHtml = "";
     if (siradakiKalkislar && siradakiKalkislar.length > 0) {
       scheduleHtml = `
         <div class="schedule-bar">
-          <span class="sched-label">🕒 İlk Durak Planlı Kalkış:</span>
+          <span class="sched-label">🕒 İlk Durak (${durak.ilkDurakAdi}) Kalkış:</span>
           <div class="sched-times">
             ${siradakiKalkislar.map((t, i) => `
               <span class="sched-time ${i === 0 ? 'sched-next' : ''}">${t}</span>
@@ -116,6 +157,7 @@ function renderDashboard(data) {
 
         <div class="card-body">
           ${busListHtml}
+          ${otherLinesHtml}
         </div>
 
         ${scheduleHtml}
@@ -128,7 +170,7 @@ function renderDashboard(data) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta http-equiv="refresh" content="${refreshSeconds}">
+  ${!isCaptchaOpen ? `<meta http-equiv="refresh" content="${refreshSeconds}">` : ''}
   <title>${title}</title>
   <style>
     * {
@@ -151,7 +193,7 @@ function renderDashboard(data) {
     header {
       background: #0f172a;
       border-bottom: 2px solid #1e293b;
-      height: 52px;
+      height: 50px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -164,10 +206,10 @@ function renderDashboard(data) {
       gap: 10px;
     }
     .logo-icon {
-      font-size: 22px;
+      font-size: 20px;
     }
     .logo-text {
-      font-size: 19px;
+      font-size: 18px;
       font-weight: 800;
       letter-spacing: 1px;
       color: #38bdf8;
@@ -185,24 +227,101 @@ function renderDashboard(data) {
       gap: 12px;
     }
     .clock-time {
-      font-size: 26px;
+      font-size: 24px;
       font-weight: 800;
       color: #f8fafc;
       font-variant-numeric: tabular-nums;
       letter-spacing: 1px;
     }
     .clock-date {
-      font-size: 13px;
+      font-size: 12px;
       color: #94a3b8;
+    }
+    .captcha-banner {
+      background: #1e1b4b;
+      border-bottom: 2px solid #4f46e5;
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    .cap-left {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .cap-badge {
+      font-size: 11px;
+      font-weight: 800;
+      color: #fbbf24;
+      letter-spacing: 0.5px;
+    }
+    .cap-desc {
+      font-size: 12px;
+      color: #e0e7ff;
+    }
+    .cap-err {
+      font-size: 11px;
+      color: #f87171;
+      font-weight: 700;
+    }
+    .cap-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .cap-img {
+      height: 38px;
+      border-radius: 6px;
+      border: 2px solid #fff;
+      background: #fff;
+    }
+    .cap-input {
+      width: 115px;
+      height: 38px;
+      border-radius: 6px;
+      border: 1px solid #6366f1;
+      background: #0f172a;
+      color: #fff;
+      font-size: 16px;
+      font-weight: 800;
+      text-align: center;
+      letter-spacing: 2px;
+      outline: none;
+    }
+    .cap-btn {
+      height: 38px;
+      padding: 0 14px;
+      border-radius: 6px;
+      border: none;
+      background: #10b981;
+      color: #052e16;
+      font-size: 12px;
+      font-weight: 900;
+      cursor: pointer;
+    }
+    .cap-refresh {
+      height: 38px;
+      width: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #312e81;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 15px;
     }
     main {
       flex: 1;
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 14px;
-      padding: 12px 14px;
+      gap: 12px;
+      padding: 10px 14px;
       background: #080c14;
       align-items: stretch;
+      overflow: hidden;
     }
     .card {
       background: #111827;
@@ -210,19 +329,20 @@ function renderDashboard(data) {
       border-radius: 12px;
       display: flex;
       flex-direction: column;
-      padding: 12px 14px;
+      padding: 11px 14px;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      overflow: hidden;
     }
     .card-header {
       display: flex;
       justify-content: space-between;
       align-items: flex-start;
-      margin-bottom: 8px;
-      padding-bottom: 8px;
+      margin-bottom: 7px;
+      padding-bottom: 7px;
       border-bottom: 1px solid #1f2937;
     }
     .stop-name {
-      font-size: 17px;
+      font-size: 16px;
       font-weight: 700;
       color: #f9fafb;
     }
@@ -245,6 +365,11 @@ function renderDashboard(data) {
       color: #34d399;
       border: 1px solid #059669;
     }
+    .badge-warn {
+      background: rgba(245, 158, 11, 0.18);
+      color: #fbbf24;
+      border: 1px solid #d97706;
+    }
     .badge-standby {
       background: rgba(148, 163, 184, 0.12);
       color: #94a3b8;
@@ -255,14 +380,14 @@ function renderDashboard(data) {
       align-items: center;
       gap: 10px;
       background: #1f2937;
-      padding: 7px 10px;
+      padding: 6px 10px;
       border-radius: 8px;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
     }
     .line-badge {
       background: #f59e0b;
       color: #000;
-      font-size: 21px;
+      font-size: 20px;
       font-weight: 900;
       padding: 2px 10px;
       border-radius: 6px;
@@ -290,14 +415,15 @@ function renderDashboard(data) {
       display: flex;
       flex-direction: column;
       justify-content: center;
+      gap: 6px;
     }
     .primary-bus {
       display: flex;
       align-items: center;
-      gap: 14px;
+      gap: 12px;
       background: rgba(15, 23, 42, 0.85);
       border: 1px solid #334155;
-      padding: 10px 14px;
+      padding: 9px 12px;
       border-radius: 10px;
     }
     .bus-imminent {
@@ -311,15 +437,15 @@ function renderDashboard(data) {
       justify-content: center;
       background: #0284c7;
       color: #fff;
-      padding: 8px 12px;
+      padding: 6px 12px;
       border-radius: 8px;
-      min-width: 84px;
+      min-width: 82px;
     }
     .box-imminent {
       background: #059669;
     }
     .arrival-val {
-      font-size: 34px;
+      font-size: 32px;
       font-weight: 900;
       line-height: 1;
     }
@@ -328,24 +454,31 @@ function renderDashboard(data) {
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.8px;
-      margin-top: 3px;
+      margin-top: 2px;
     }
     .arrival-detail {
       display: flex;
       flex-direction: column;
-      gap: 3px;
+      gap: 4px;
       overflow: hidden;
     }
     .detail-line {
-      font-size: 15px;
+      font-size: 14px;
       color: #f8fafc;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
     }
     .detail-line strong {
       color: #38bdf8;
     }
-    .dist-tag {
-      font-size: 12px;
+    .feat-tags {
+      font-size: 11px;
       color: #94a3b8;
+      background: #1e293b;
+      padding: 1px 6px;
+      border-radius: 4px;
     }
     .detail-location {
       font-size: 12px;
@@ -357,12 +490,7 @@ function renderDashboard(data) {
     .detail-location strong {
       color: #fbbf24;
     }
-    .detail-sub {
-      font-size: 11px;
-      color: #94a3b8;
-    }
     .secondary-buses {
-      margin-top: 8px;
       display: flex;
       align-items: center;
       gap: 6px;
@@ -384,54 +512,81 @@ function renderDashboard(data) {
       background: #1e293b;
       border: 1px solid #334155;
       color: #cbd5e1;
-      padding: 3px 8px;
-      border-radius: 6px;
+      padding: 2px 7px;
+      border-radius: 5px;
       font-size: 11px;
     }
     .sec-pill strong {
       color: #38bdf8;
     }
+    .other-lines-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      padding-top: 4px;
+    }
+    .other-label {
+      font-size: 10px;
+      color: #64748b;
+      font-weight: 600;
+    }
+    .other-pills {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+    .other-pill {
+      background: rgba(30, 41, 59, 0.7);
+      border: 1px solid #1e293b;
+      color: #94a3b8;
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+    .other-pill b {
+      color: #e2e8f0;
+    }
     .empty-state {
       text-align: center;
-      padding: 14px 10px;
+      padding: 12px 10px;
       background: rgba(15, 23, 42, 0.5);
       border: 1px dashed #334155;
       border-radius: 10px;
     }
     .empty-title {
-      font-size: 14px;
-      font-weight: 600;
+      font-size: 13px;
       color: #94a3b8;
     }
-    .waiting-note {
-      margin-top: 6px;
-      font-size: 12px;
-      color: #cbd5e1;
-    }
-    .waiting-note strong {
-      color: #fbbf24;
+    .empty-title strong {
+      color: #f8fafc;
     }
     .schedule-bar {
-      margin-top: 10px;
-      padding-top: 8px;
+      margin-top: 8px;
+      padding-top: 7px;
       border-top: 1px solid #1f2937;
       display: flex;
       align-items: center;
       justify-content: space-between;
       font-size: 11px;
+      gap: 6px;
     }
     .sched-label {
       color: #94a3b8;
       font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .sched-times {
       display: flex;
-      gap: 6px;
+      gap: 5px;
+      flex-shrink: 0;
     }
     .sched-time {
       background: #1e293b;
       color: #cbd5e1;
-      padding: 2px 7px;
+      padding: 2px 6px;
       border-radius: 5px;
       font-weight: 700;
       font-variant-numeric: tabular-nums;
@@ -442,7 +597,7 @@ function renderDashboard(data) {
       border: 1px solid rgba(245, 158, 11, 0.4);
     }
     footer {
-      height: 30px;
+      height: 28px;
       background: #0b1120;
       border-top: 1px solid #1e293b;
       display: flex;
@@ -481,13 +636,15 @@ function renderDashboard(data) {
     <div class="logo-area">
       <span class="logo-icon">🚍</span>
       <span class="logo-text">DurakPano</span>
-      <span class="logo-sub">İETT Canlı Durak Takibi</span>
+      <span class="logo-sub">Resmi durak.iett.gov.tr Canlı Verisi</span>
     </div>
     <div class="clock-area">
       <span class="clock-date">${currentDate}</span>
       <span class="clock-time" id="clock">${currentTime}</span>
     </div>
   </header>
+
+  ${captchaBannerHtml}
 
   <main>
     ${cardsHtml}

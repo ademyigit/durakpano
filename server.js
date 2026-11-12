@@ -240,42 +240,23 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/api/debug-ibb') {
     try {
       const https = require('https');
-      const envelope = `<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-  <soap:Body>
-    <GetHatOtoKonum_json xmlns="http://tempuri.org/">
-      <HatKodu>19</HatKodu>
-    </GetHatOtoKonum_json>
-  </soap:Body>
-</soap:Envelope>`;
-
-      const reqPromise = new Promise((resolve) => {
-        const r = https.request({
-          hostname: 'api.ibb.gov.tr',
-          port: 443,
-          path: '/iett/FiloDurum/SeferGerceklesme.asmx',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'text/xml; charset=utf-8',
-            'SOAPAction': 'http://tempuri.org/GetHatOtoKonum_json',
-            'User-Agent': 'Mozilla/5.0'
-          },
-          timeout: 6000,
-          rejectUnauthorized: false
-        }, (res) => {
-          let b = '';
-          res.on('data', d => b += d);
-          res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: b }));
+      const testHost = (hostname, path = '/') => new Promise(resolve => {
+        const req = https.get({ hostname, path, timeout: 4000, rejectUnauthorized: false }, res => {
+          resolve({ hostname, status: res.statusCode });
         });
-        r.on('error', e => resolve({ error: e.message, code: e.code }));
-        r.on('timeout', () => { r.destroy(); resolve({ error: 'TIMEOUT' }); });
-        r.write(envelope);
-        r.end();
+        req.on('error', e => resolve({ hostname, error: e.message, code: e.code }));
+        req.on('timeout', () => { req.destroy(); resolve({ hostname, error: 'TIMEOUT' }); });
       });
 
-      const rawResult = await reqPromise;
+      const tests = await Promise.all([
+        testHost('api.ibb.gov.tr', '/iett/FiloDurum/SeferGerceklesme.asmx'),
+        testHost('durak.iett.gov.tr', '/'),
+        testHost('iett.istanbul', '/'),
+        testHost('data.ibb.gov.tr', '/api/3/action/package_list')
+      ]);
+
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ rawResult }));
+      res.end(JSON.stringify({ tests }));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ error: err.message }));

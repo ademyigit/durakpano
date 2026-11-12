@@ -1,18 +1,14 @@
-const express = require('express');
+const http = require('http');
+const { URL } = require('url');
 const config = require('./config');
 const { getDurakVarisBilgisi } = require('./services/iettService');
 const { renderDashboard } = require('./views/dashboard');
 
-const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Statik dosyalar (varsa)
-app.use(express.static('public'));
-
-// Yardımcı tarih & saat biçimlendirici (Türkçe)
+// Tarih ve Saat biçimlendirici (İstanbul UTC+3)
 function getFormattedDateTime() {
   const now = new Date();
-  // İstanbul yerel saati UTC+3
   const istanbulTime = new Date(now.toLocaleString("en-US", { timeZone: "Europe/Istanbul" }));
 
   const hours = String(istanbulTime.getHours()).padStart(2, '0');
@@ -33,63 +29,86 @@ function getFormattedDateTime() {
   return { currentTime, currentDate };
 }
 
-// Ana Dashboard Sayfası
-app.get('/', async (req, res) => {
-  try {
-    const stopsData = await Promise.all(
-      config.stops.map(stop => getDurakVarisBilgisi(stop))
-    );
+// Ana HTTP Sunucusu (Sıfır harici paket, Node.js yerleşik)
+const server = http.createServer(async (req, res) => {
+  const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const pathname = parsedUrl.pathname;
 
-    const { currentTime, currentDate } = getFormattedDateTime();
+  // 1. Ana Dashboard Arayüzü
+  if (pathname === '/' || pathname === '/index.html') {
+    try {
+      const stopsData = await Promise.all(
+        config.stops.map(stop => getDurakVarisBilgisi(stop))
+      );
 
-    const html = renderDashboard({
-      title: config.siteTitle,
-      refreshSeconds: config.refreshIntervalSeconds,
-      currentTime,
-      currentDate,
-      stopsData
-    });
+      const { currentTime, currentDate } = getFormattedDateTime();
 
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.send(html);
-  } catch (error) {
-    console.error('Dashboard oluşturulurken hata:', error);
-    res.status(500).send('DurakPano yüklenirken geçici bir hata oluştu.');
+      const html = renderDashboard({
+        title: config.siteTitle,
+        refreshSeconds: config.refreshIntervalSeconds,
+        currentTime,
+        currentDate,
+        stopsData
+      });
+
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache, no-store, must-revalidate'
+      });
+      res.end(html);
+    } catch (error) {
+      console.error('Hata:', error);
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('DurakPano yüklenirken hata oluştu.');
+    }
+    return;
   }
-});
 
-// JSON API Endpoint (Akıllı Ev veya Home Assistant için)
-app.get('/api/status', async (req, res) => {
-  try {
-    const stopsData = await Promise.all(
-      config.stops.map(stop => getDurakVarisBilgisi(stop))
-    );
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      stops: stopsData
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+  // 2. JSON API Endpoint (Home Assistant / Geliştiriciler)
+  if (pathname === '/api/status') {
+    try {
+      const stopsData = await Promise.all(
+        config.stops.map(stop => getDurakVarisBilgisi(stop))
+      );
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(JSON.stringify({
+        success: true,
+        timestamp: new Date().toISOString(),
+        stops: stopsData
+      }));
+    } catch (error) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: false, error: error.message }));
+    }
+    return;
   }
-});
 
-// Sağlık Kontrolü (Render & Docker için)
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+  // 3. Sağlık Kontrolü (Render/Docker)
+  if (pathname === '/health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('OK');
+    return;
+  }
+
+  // 404
+  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('Sayfa bulunamadı');
 });
 
 // Yerel sunucu başlatma
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
-  app.listen(PORT, () => {
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n======================================================`);
-    console.log(`🚍 DurakPano Servisi Çalışıyor!`);
-    console.log(`📡 URL: http://localhost:${PORT}`);
-    console.log(`🚏 Takip Edilen Duraklar: ${config.stops.map(s => s.durakKodu + ' (' + s.hatKodu + ')').join(', ')}`);
+    console.log(`🚍 DurakPano Servisi Başlatıldı!`);
+    console.log(`📡 Yerel Adres: http://localhost:${PORT}`);
+    console.log(`📱 Ağdaki Cihazlar İçin Adres: http://YEREL_IP_ADRESINIZ:${PORT}`);
+    console.log(`🚏 Takip: 205671 (Hat 19) & 213801 (Hat 14TM)`);
     console.log(`======================================================\n`);
   });
 }
 
 // Vercel serverless export
-module.exports = app;
+module.exports = server;

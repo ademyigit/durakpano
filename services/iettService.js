@@ -1,11 +1,12 @@
-const axios = require('axios');
+const https = require('https');
+const { URL } = require('url');
 const config = require('../config');
 
 /**
  * Haversine formülü ile iki koordinat arası kuş uçuşu mesafe (km)
  */
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  const R = 6371; // Dünya yarıçapı km
+  const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
   const a =
@@ -14,6 +15,43 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+/**
+ * Sıfır bağımlılıklı standart HTTPS POST isteği
+ */
+function sendHttpsPost(urlStr, data, headers, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    try {
+      const parsedUrl = new URL(urlStr);
+      const options = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || 443,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: 'POST',
+        headers: headers,
+        timeout: timeoutMs,
+        rejectUnauthorized: false
+      };
+
+      const req = https.request(options, (res) => {
+        let body = '';
+        res.on('data', chunk => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, data: body }));
+      });
+
+      req.on('error', err => reject(err));
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('İstek zaman aşımına uğradı'));
+      });
+
+      req.write(data);
+      req.end();
+    } catch (e) {
+      reject(e);
+    }
+  });
 }
 
 /**
@@ -30,17 +68,18 @@ async function fetchHatKonumFromIETT(hatKodu) {
 </soap:Envelope>`;
 
   try {
-    const response = await axios.post(config.api.seferGerceklesmeUrl, soapEnvelope, {
-      headers: {
+    const res = await sendHttpsPost(
+      config.api.seferGerceklesmeUrl,
+      soapEnvelope,
+      {
         'Content-Type': 'text/xml; charset=utf-8',
         'SOAPAction': 'http://tempuri.org/GetHatOtoKonum_json',
         'User-Agent': 'DurakPano/1.0 (Smart Transit Kiosk)'
       },
-      timeout: config.api.timeoutMs
-    });
+      config.api.timeoutMs
+    );
 
-    const xmlData = response.data;
-    // SOAP yanıtı içindeki JSON string'i ayıkla
+    const xmlData = res.data;
     const match = xmlData.match(/<GetHatOtoKonum_jsonResult>(.*?)<\/GetHatOtoKonum_jsonResult>/s);
     if (match && match[1]) {
       const parsed = JSON.parse(match[1]);
@@ -50,7 +89,6 @@ async function fetchHatKonumFromIETT(hatKodu) {
     }
     return null;
   } catch (err) {
-    // API bağlantı hatası veya bakım durumu
     return null;
   }
 }
@@ -62,7 +100,6 @@ async function getDurakVarisBilgisi(stop) {
   const liveVehicles = await fetchHatKonumFromIETT(stop.hatKodu);
 
   if (liveVehicles && liveVehicles.length > 0) {
-    // Canlı araçlar bulundu, durağa yaklaşanları filtrele ve mesafeye göre sırala
     const candidateBuses = [];
 
     for (const v of liveVehicles) {
@@ -74,12 +111,10 @@ async function getDurakVarisBilgisi(stop) {
 
       const distKm = calculateDistanceKm(lat, lng, stop.koordinat.lat, stop.koordinat.lng);
 
-      // Sadece durağa 15 km'den yakın ve mantıklı araçları al
       if (distKm <= 15) {
-        // İstanbul şehir içi otobüs ortalama hızı ~18-25 km/s + durak bekleme süreleri
         const effectiveSpeed = Math.max(speed, 18);
         const estimatedMinutes = Math.max(1, Math.round((distKm / effectiveSpeed) * 60));
-        const estimatedStops = Math.max(1, Math.round(distKm / 0.7)); // Ortalama 700m durak aralığı
+        const estimatedStops = Math.max(1, Math.round(distKm / 0.7));
 
         candidateBuses.push({
           kapiNo: v.KapiNo || v.kapiNo || "İETT",
@@ -103,7 +138,6 @@ async function getDurakVarisBilgisi(stop) {
     }
   }
 
-  // Canlı GPS servisi o an müsait değilse veya gece saatleriyse mantıklı tarife/tahmini süre üret
   return getSimulatedFallback(stop);
 }
 
@@ -112,10 +146,9 @@ async function getDurakVarisBilgisi(stop) {
  */
 function getSimulatedFallback(stop) {
   const now = new Date();
-  const currentHour = (now.getUTCHours() + 3) % 24; // İstanbul UTC+3
+  const currentHour = (now.getUTCHours() + 3) % 24;
   const currentMin = now.getMinutes();
 
-  // Gece 00:30 ile 06:00 arası seferler genellikle seyrektir veya yoktur
   const isNight = currentHour >= 1 && currentHour < 6;
 
   if (isNight) {
@@ -127,7 +160,6 @@ function getSimulatedFallback(stop) {
     };
   }
 
-  // Gündüz saatlerinde tahmini periyodik sefer aralıkları (19 ve 14TM genelde 10-18 dk aralıklıdır)
   const interval = stop.hatKodu === "19" ? 12 : 16;
   const firstWait = interval - (currentMin % interval);
   const secondWait = firstWait + interval;

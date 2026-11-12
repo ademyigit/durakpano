@@ -1,12 +1,7 @@
 const http = require('http');
 const { URL } = require('url');
 const config = require('./config');
-const {
-  getDurakVarisBilgisi,
-  getCaptchaState,
-  generateDurakCaptcha,
-  submitDurakCaptcha
-} = require('./services/iettService');
+const { getDurakVarisBilgisi, startBackgroundPoller } = require('./services/iettService');
 const { renderDashboard } = require('./views/dashboard');
 
 const PORT = process.env.PORT || 3000;
@@ -37,27 +32,16 @@ const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = parsedUrl.pathname;
 
-  // 1. İETT Resmi Canlı Veri (durak.iett.gov.tr) Doğrulama Kodu Gönderimi
-  if (pathname === '/api/verify-captcha') {
-    const code = parsedUrl.searchParams.get('code') || '';
-    await submitDurakCaptcha(code, config.stops[0].durakKodu);
+  // Eski doğrulama adreslerinden gelen istekleri doğrudan ana ekrana yönlendir
+  if (pathname === '/api/verify-captcha' || pathname === '/api/refresh-captcha') {
     res.writeHead(302, { Location: '/' });
     res.end();
     return;
   }
 
-  // 2. Yeni Doğrulama Kodu İsteği
-  if (pathname === '/api/refresh-captcha') {
-    await generateDurakCaptcha(true);
-    res.writeHead(302, { Location: '/' });
-    res.end();
-    return;
-  }
-
-  // 3. Ana Dashboard Arayüzü
+  // 1. Ana Dashboard Arayüzü
   if (pathname === '/' || pathname === '/index.html') {
     try {
-      // Sıralı sorgula (Aynı anda çerez çakışmasını önlemek için)
       const stopsData = [];
       for (const stop of config.stops) {
         const info = await getDurakVarisBilgisi(stop);
@@ -65,15 +49,13 @@ const server = http.createServer(async (req, res) => {
       }
 
       const { currentTime, currentDate } = getFormattedDateTime();
-      const captchaState = getCaptchaState();
 
       const html = renderDashboard({
         title: config.siteTitle,
         refreshSeconds: config.refreshIntervalSeconds,
         currentTime,
         currentDate,
-        stopsData,
-        captchaState
+        stopsData
       });
 
       res.writeHead(200, {
@@ -89,7 +71,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 4. JSON API Endpoint
+  // 2. JSON API Endpoint
   if (pathname === '/api/status') {
     try {
       const stopsData = [];
@@ -103,7 +85,6 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({
         success: true,
         timestamp: new Date().toISOString(),
-        captchaRequired: getCaptchaState().required,
         stops: stopsData
       }));
     } catch (error) {
@@ -113,7 +94,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 5. Sağlık Kontrolü
+  // 3. Sağlık Kontrolü
   if (pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('OK');
@@ -125,9 +106,10 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  startBackgroundPoller();
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n======================================================`);
-    console.log(`🚍 DurakPano Servisi Başlatıldı! (Resmi durak.iett.gov.tr Entegrasyonu)`);
+    console.log(`🚍 DurakPano Canlı Otobüs Panosu Başlatıldı! (Captcha'sız Doğrudan GPS)`);
     console.log(`📡 Yerel Adres: http://localhost:${PORT}`);
     console.log(`🚏 Takip: 205671 (Hat 19) & 213801 (Hat 14TM)`);
     console.log(`======================================================\n`);
